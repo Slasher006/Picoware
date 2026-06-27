@@ -27,7 +27,7 @@ static uint16_t lcd_scale_y(lcd_mp_obj_t *self, uint16_t v)
 }
 static inline int lcd_obj_to_int(mp_obj_t arg)
 {
-    if (mp_obj_is_int(arg))
+    if (mp_obj_is_int(arg) || mp_obj_is_exact_type(arg, &mp_type_bool))
     {
         return mp_obj_get_int(arg);
     }

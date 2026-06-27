@@ -100,7 +100,6 @@ mkdir -p "$micropython_dir"/modules/Waveshare/RP2350-Touch-LCD-3.49
 
 # copy waveshare 3.49 modules file to micropython modules directory
 cp "$picoware_dir"/src/MicroPython/Waveshare/RP2350-Touch-LCD-3.49/waveshare_modules.cmake "$micropython_dir"/modules/Waveshare/RP2350-Touch-LCD-3.49/waveshare_modules.cmake
-cp -r "$picoware_dir"/src/MicroPython/Waveshare/RP2350-Touch-LCD-3.49/picoware_game "$micropython_dir"/modules/Waveshare/RP2350-Touch-LCD-3.49/picoware_game
 cp -r "$picoware_dir"/src/MicroPython/Waveshare/RP2350-Touch-LCD-3.49/waveshare_battery "$micropython_dir"/modules/Waveshare/RP2350-Touch-LCD-3.49/waveshare_battery
 cp -r "$picoware_dir"/src/MicroPython/Waveshare/RP2350-Touch-LCD-3.49/waveshare_lcd "$micropython_dir"/modules/Waveshare/RP2350-Touch-LCD-3.49/waveshare_lcd
 cp -r "$picoware_dir"/src/MicroPython/Waveshare/RP2350-Touch-LCD-3.49/waveshare_touch "$micropython_dir"/modules/Waveshare/RP2350-Touch-LCD-3.49/waveshare_touch

@@ -23,6 +23,21 @@ HTTP_ISSUE = const(2)
 class HTTP:
     """HTTP class for making HTTP requests."""
 
+    __slots__ = [
+        "_async_request_complete",
+        "_async_request_in_progress",
+        "_async_thread_id",
+        "_state",
+        "_async_error",
+        "_async_callback",
+        "_async_result",
+        "_lock",
+        "_running",
+        "_chunk_size",
+        "_thread_manager",
+        "_current_task",
+    ]
+
     def __init__(self, chunk_size: int = (1024 * 4), thread_manager=None) -> None:
         """Initialize the HTTP class."""
         from _thread import allocate_lock
@@ -456,7 +471,7 @@ class HTTP:
                 "POST",
                 url,
                 headers=headers,
-                data=dumps(payload),
+                json_data=dumps(payload),
                 timeout=timeout,
                 save_to_file=save_to_file,
                 storage=storage,
@@ -790,8 +805,11 @@ class HTTP:
                 s.write(b"\r\n")
             if json_data is not None:
                 assert data is None
-                data = dumps(json_data)
+                data = json_data
                 s.write(b"Content-Type: application/json\r\n")
+            # Normalize to bytes for non-chunked payloads
+            if data and not chunked_data and isinstance(data, str):
+                data = data.encode()
             if data:
                 if chunked_data:
                     s.write(b"Transfer-Encoding: chunked\r\n")
@@ -806,7 +824,13 @@ class HTTP:
                         s.write(b"\r\n")
                     s.write(b"0\r\n\r\n")
                 else:
-                    s.write(data)
+                    _total = len(data)
+                    _sent = 0
+                    while _sent < _total:
+                        _n = s.write(data[_sent:_sent + self._chunk_size])
+                        if not _n:
+                            break
+                        _sent += _n
 
             # Read the status line
             l = s.readline()
@@ -1089,7 +1113,8 @@ class HTTP:
             method = method.upper()
 
             if method == "GET":
-                result = self.get(
+                result = self.request(
+                    "GET",
                     url,
                     headers=headers,
                     timeout=timeout,
@@ -1097,25 +1122,50 @@ class HTTP:
                     storage=storage,
                 )
             elif method == "POST":
-                result = self.post(
-                    url,
-                    payload,
-                    headers=headers,
-                    timeout=timeout,
-                    save_to_file=save_to_file,
-                    storage=storage,
-                )
+                if isinstance(payload, (str, bytes)):
+                    result = self.request(
+                        "POST",
+                        url,
+                        payload,
+                        headers=headers,
+                        timeout=timeout,
+                        save_to_file=save_to_file,
+                        storage=storage,
+                    )
+                else:
+                    result = self.request(
+                        "POST",
+                        url,
+                        json_data=dumps(payload),
+                        headers=headers,
+                        timeout=timeout,
+                        save_to_file=save_to_file,
+                        storage=storage,
+                    )
             elif method == "PUT":
-                result = self.put(
-                    url,
-                    payload,
-                    headers=headers,
-                    timeout=timeout,
-                    save_to_file=save_to_file,
-                    storage=storage,
-                )
+                if isinstance(payload, (str, bytes)):
+                    result = self.request(
+                        "PUT",
+                        url,
+                        payload,
+                        headers=headers,
+                        timeout=timeout,
+                        save_to_file=save_to_file,
+                        storage=storage,
+                    )
+                else:
+                    result = self.request(
+                        "PUT",
+                        url,
+                        json_data=dumps(payload),
+                        headers=headers,
+                        timeout=timeout,
+                        save_to_file=save_to_file,
+                        storage=storage,
+                    )
             elif method == "DELETE":
-                result = self.delete(
+                result = self.request(
+                    "DELETE",
                     url,
                     headers=headers,
                     timeout=timeout,
@@ -1123,23 +1173,47 @@ class HTTP:
                     storage=storage,
                 )
             elif method == "HEAD":
-                result = self.head(
-                    url,
-                    payload,
-                    headers=headers,
-                    timeout=timeout,
-                    save_to_file=save_to_file,
-                    storage=storage,
-                )
+                if isinstance(payload, (str, bytes)):
+                    result = self.request(
+                        "HEAD",
+                        url,
+                        payload,
+                        headers=headers,
+                        timeout=timeout,
+                        save_to_file=save_to_file,
+                        storage=storage,
+                    )
+                else:
+                    result = self.request(
+                        "HEAD",
+                        url,
+                        json_data=dumps(payload),
+                        headers=headers,
+                        timeout=timeout,
+                        save_to_file=save_to_file,
+                        storage=storage,
+                    )
             elif method == "PATCH":
-                result = self.patch(
-                    url,
-                    payload,
-                    headers=headers,
-                    timeout=timeout,
-                    save_to_file=save_to_file,
-                    storage=storage,
-                )
+                if isinstance(payload, (str, bytes)):
+                    result = self.request(
+                        "PATCH",
+                        url,
+                        payload,
+                        headers=headers,
+                        timeout=timeout,
+                        save_to_file=save_to_file,
+                        storage=storage,
+                    )
+                else:
+                    result = self.request(
+                        "PATCH",
+                        url,
+                        json_data=dumps(payload),
+                        headers=headers,
+                        timeout=timeout,
+                        save_to_file=save_to_file,
+                        storage=storage,
+                    )
 
             with self._lock:
                 if result:
