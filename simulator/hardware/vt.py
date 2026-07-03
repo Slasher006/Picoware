@@ -18,13 +18,7 @@ def _line_text(row):
 
 
 def render(buffer, *args):
-    """Render-compatible VT shim.
-
-    Picoware's Python VT driver calls the native module with the C signature:
-    render(buffer, rows, cols, char_h, char_w, bg, fg, cursor_visible, ...).
-    Older simulator tests used render(buffer, rows, cols, char_h, char_w, draw,
-    fg, bg, ...). Accept both forms and draw to the active LCD framebuffer.
-    """
+    """Render-compatible VT shim for native and test signatures."""
     screen_height = int(args[0]) if len(args) > 0 else len(buffer)
     char_height = int(args[2]) if len(args) > 2 else 12
     char_width = int(args[3]) if len(args) > 3 else 7

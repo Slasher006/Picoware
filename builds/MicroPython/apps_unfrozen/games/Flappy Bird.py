@@ -389,6 +389,7 @@ class PILAR:
         self.height: int = 0
         self.visible: int = 0
         self.passed: bool = False
+        self.spawned_next: bool = False
 
     def __del__(self):
         if self.point:
@@ -515,9 +516,11 @@ def __flappy_game_tick() -> None:
     _game_state.bird.gravity += FLAPPY_GRAVITY_TICK
     _game_state.bird.point.y += _game_state.bird.gravity
 
-    # Spawn new pillar if needed
+    # Spawn the next pillar once the current leading pillar crosses the spacing threshold.
     pilar: PILAR = _game_state.pilars[_game_state.pilars_count % FLAPPY_PILAR_MAX]
-    if pilar.point.x == (FLIPPER_LCD_WIDTH - FLAPPY_PILAR_DIST) + 3:
+    spawn_x = (FLIPPER_LCD_WIDTH - FLAPPY_PILAR_DIST) + 3
+    if pilar.visible and not pilar.spawned_next and pilar.point.x <= spawn_x:
+        pilar.spawned_next = True
         __flappy_game_random_pilar()
 
     # Bird above screen

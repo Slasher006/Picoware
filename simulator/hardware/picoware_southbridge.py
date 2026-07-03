@@ -19,6 +19,12 @@ def init():
 
 def get_battery_percentage():
     """Return simulated battery percentage."""
+    try:
+        import sim_runtime
+
+        return sim_runtime.battery_percentage()
+    except Exception:
+        pass
     return _battery_percentage
 
 
@@ -26,6 +32,12 @@ def set_battery_percentage(value):
     """Set simulated battery percentage (0-100)."""
     global _battery_percentage
     _battery_percentage = max(0, min(100, int(value)))
+    try:
+        import sim_runtime
+
+        sim_runtime.set_battery_percentage(_battery_percentage)
+    except Exception:
+        pass
     return True
 
 

@@ -673,7 +673,8 @@ def run(view_manager) -> None:
             new_state = not _toggle.state
             _toggle.state = new_state
             cfg = __config()[_current_setting]
-            _settings.__save_setting(cfg[1], cfg[2], new_state)
+            _settings._settings[cfg[2]] = new_state
+            _settings.__save_settings()
             __apply_toggle_setting(_current_setting, new_state)
 
     elif _mode == _MODE_CHOICE:

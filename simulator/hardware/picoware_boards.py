@@ -11,7 +11,7 @@ BOARD_CARDPUTER = 9
 
 try:
     import sim_runtime
-    _name = sim_runtime.board
+    _name = str(sim_runtime.board).lower().replace("_", "-")
 except Exception:
     _name = "picocalc-pico2w"
 
@@ -21,12 +21,24 @@ elif _name == "picocalc-picow":
     BOARD_ID = BOARD_PICOCALC_PICOW
 elif _name == "picocalc-pico2":
     BOARD_ID = BOARD_PICOCALC_PICO_2
+elif _name in ("waveshare-1.28-rp2350", "waveshare-1-28-rp2350", "waveshare-128-rp2350"):
+    BOARD_ID = BOARD_WAVESHARE_1_28_RP2350
+elif _name in ("waveshare-1.43-rp2350", "waveshare-1-43-rp2350", "waveshare-143-rp2350"):
+    BOARD_ID = BOARD_WAVESHARE_1_43_RP2350
+elif _name in ("waveshare-3.49-rp2350", "waveshare-3-49-rp2350", "waveshare-349-rp2350"):
+    BOARD_ID = BOARD_WAVESHARE_3_49_RP2350
+elif _name in ("picocalc-pimoroni-2w", "pimoroni-2w"):
+    BOARD_ID = BOARD_PICOCALC_PIMORONI_2W
+elif _name in ("crowpanel-10.1", "crowpanel-10-1", "crowpanel"):
+    BOARD_ID = BOARD_CROWPANEL_10_1
+elif _name == "cardputer":
+    BOARD_ID = BOARD_CARDPUTER
 else:
     BOARD_ID = BOARD_PICOCALC_PICO_2W
 
 BOARD_HAS_PSRAM = 1 if BOARD_ID in (BOARD_PICOCALC_PICO_2, BOARD_PICOCALC_PICO_2W, BOARD_PICOCALC_PIMORONI_2W) else 0
 BOARD_HAS_SD = 1
-BOARD_HAS_TOUCH = 0
+BOARD_HAS_TOUCH = 1 if BOARD_ID in (BOARD_WAVESHARE_1_28_RP2350, BOARD_WAVESHARE_1_43_RP2350, BOARD_WAVESHARE_3_49_RP2350, BOARD_CROWPANEL_10_1) else 0
 BOARD_HAS_WIFI = 1 if BOARD_ID in (BOARD_PICOCALC_PICOW, BOARD_PICOCALC_PICO_2W) else 0
 BOARD_HAS_AUDIO = 1
 

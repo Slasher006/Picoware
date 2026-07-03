@@ -1,6 +1,5 @@
 import json
 from micropython import const
-from ujson import dumps
 from picoware.system.agent.tools import dispatch
 from picoware.system.agent.llm import LLM, DEEPSEEK
 
@@ -12,15 +11,28 @@ MAX_CONVERSATION_MESSAGES = const(20)
 
 class Agent:
     """Agent that can perform tasks using tools and LLMs."""
-    __slots__ = ["mode", "tools", "llm_provider", "view_manager", "http"]
+    __slots__ = ["mode", "tools", "llm_provider", "view_manager", "http", "_file_path", "_conv_path"]
 
-    def __init__(self, view_manager, mode: int, llm_id: int = DEEPSEEK):
+    def __init__(self, view_manager, mode: int, llm_id: int = DEEPSEEK, file_path: str = "picoware/settings/agent_request.json"):
         from picoware.system.http import HTTP
         self.view_manager = view_manager
         self.mode = mode
         self.tools = []
         self.llm_provider = LLM(view_manager.storage, llm_id)
         self.http = HTTP(thread_manager=view_manager.thread_manager)
+        self._file_path = file_path
+        self._conv_path = "picoware/settings/agent_conv.json"
+    
+    def __del__(self):
+        """Cleanup resources on deletion."""
+        self.tools.clear()
+        self.llm_provider = None
+        self.http = None
+    
+    @property
+    def file_path(self) -> str:
+        """Get the file path associated with the agent."""
+        return self._file_path
 
     def _parse_tool_arguments(self, raw_args) -> dict:
         """Parse tool-call arguments defensively and return a dict."""
@@ -37,7 +49,7 @@ class Agent:
         try:
             parsed = json.loads(text)
             return parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
+        except ValueError:
             start = text.find("{")
             end = text.rfind("}")
             if start == -1 or end == -1 or end <= start:
@@ -45,28 +57,81 @@ class Agent:
             try:
                 parsed = json.loads(text[start : end + 1])
                 return parsed if isinstance(parsed, dict) else {}
-            except json.JSONDecodeError:
+            except ValueError:
                 return {}
 
+    def _conv_write_initial(self, messages: list[dict]) -> None:
+        """Write initial messages to the conversation file as comma-separated JSON."""
+        storage = self.view_manager.storage
 
-    def _run_loop(self, messages: list[dict]) -> str:
+        for i, msg in enumerate(messages):
+            if i == 0:
+                storage.write(self._conv_path, json.dumps(msg), mode="w")
+            else:
+                storage.write(self._conv_path, ',' + json.dumps(msg), mode="a")
+
+    def _conv_append(self, message: dict) -> None:
+        """Append one message to the conversation file via pure append-mode write."""
+        storage = self.view_manager.storage
+
+        if not storage.exists(self._conv_path):
+            storage.write(self._conv_path, json.dumps(message), mode="w")
+        else:
+            storage.write(self._conv_path, ',' + json.dumps(message), mode="a")
+
+    def _build_request(self, tools: list[dict]) -> None:
+        """Stream conversation file + metadata into the API request file."""
+        storage = self.view_manager.storage
+
+        # Preamble: model + messages open
+        storage.write(
+            self._file_path,
+            '{"model":"' + self.llm_provider.model + '","messages":[',
+            mode="w",
+        )
+
+        # Stream conversation file
+        conv_file = storage.file_open(self._conv_path)
+        if conv_file is not None:
+            try:
+                buf = bytearray(2048)
+                while True:
+                    n = storage.file_readinto(conv_file, buf)
+                    if not n:
+                        break
+                    storage.write(self._file_path, buf[:n], mode="wb")
+            finally:
+                storage.file_close(conv_file)
+
+        # Suffix: tools + close
+        storage.write(
+            self._file_path,
+            '],"tools":' + json.dumps(tools) + ',"tool_choice":"auto"}',
+            mode="a",
+        )
+
+    def _run_loop(self) -> str:
         """Run the model/tool loop and return assistant text."""
         tools = [tool.json_openai for tool in dispatch.get_tool_list()]
+        storage = self.view_manager.storage
 
         for _ in range(MAX_TOOL_ITERATIONS):
-            payload: dict = {
-                "model": self.llm_provider.model,
-                "messages": messages,
-                "tools": tools,
-                "tool_choice": "auto",
-            }
+            # Build request from conversation
+            self._build_request(tools)
 
             headers = {
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.llm_provider.api_key}", 
+                "Authorization": f"Bearer {self.llm_provider.api_key}",
             }
 
-            response = self.http.post(self.llm_provider.url, headers=headers, payload=dumps(payload), timeout=120)
+            response = self.http.post(
+                self.llm_provider.url,
+                headers=headers,
+                payload=None,
+                timeout=120,
+                storage=storage,
+                send_file=self._file_path,
+            )
 
             try:
                 data = response.json()
@@ -90,16 +155,19 @@ class Agent:
 
             if not message.get("tool_calls"):
                 content = message.get("content", "")
+                # Store final reply
+                self._conv_append({"role": "assistant", "content": content})
                 self.view_manager.log(f"[Agent] Final response: {content}")
                 return content if isinstance(content, str) else str(content)
 
+            # Store assistant message
             assistant_message: dict = {
                 "role": "assistant",
                 "tool_calls": message["tool_calls"],
             }
             if message.get("content") is not None:
                 assistant_message["content"] = message["content"]
-            messages.append(assistant_message)
+            self._conv_append(assistant_message)
 
             for tool_call in message["tool_calls"]:
                 name = tool_call["function"]["name"]
@@ -114,7 +182,8 @@ class Agent:
                     result = f"Tool error in {name}: {exc}"
                     self.view_manager.log(f"[Agent] {result}")
 
-                messages.append(
+                # Store tool result
+                self._conv_append(
                     {
                         "role": "tool",
                         "tool_call_id": tool_call.get("id", "unknown_tool_call"),
@@ -170,15 +239,16 @@ class Agent:
         if not user_message:
             return "No message provided."
 
+        # Write initial messages to storage
         messages = [{"role": "system", "content": system_content}]
         messages.extend(self._sanitize_conversation(conversation))
         messages.append({"role": "user", "content": user_message})
+        self._conv_write_initial(messages)
 
         try:
-            return self._run_loop(messages)
+            return self._run_loop()
         except Exception as exc:
             return f"An error occurred during processing: {exc}"
-
 
     def run_payload(self, payload: dict) -> dict:
         """Run the agent with a JSON payload and return structured response."""

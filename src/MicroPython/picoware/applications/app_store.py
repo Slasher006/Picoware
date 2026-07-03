@@ -416,6 +416,10 @@ def __parse_app_list(view_manager) -> bool:
     storage = view_manager.storage
     file_path = f"picoware/cache/app_list_{_current_list_index}.json"
 
+    if not storage.exists(file_path):
+        view_manager.log(f"App list file not found: {file_path}", 2)
+        return False
+
     try:
         data = storage.read(file_path)
         if not data:

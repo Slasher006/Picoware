@@ -240,15 +240,25 @@ def file_seek(file_obj, position):
 
 def file_write(file_obj, data):
     """Write data at the current position of an open VFS file."""
-    current = b""
-    if exists(file_obj.path):
-        current = read(file_obj.path, 0, 0)
     pos = file_obj.position
-    merged = current[:pos] + data
-    if pos + len(data) < len(current):
-        merged += current[pos + len(data) :]
-    write(file_obj.path, merged, True)
+    target = _path(file_obj.path)
+    parent = target.rsplit("/", 1)[0] if "/" in target else "."
+    sim_runtime.mkdir_p(parent)
+    try:
+        handle = open(target, "r+b")
+    except OSError:
+        handle = open(target, "w+b")
+    try:
+        handle.seek(pos)
+        handle.write(data)
+        try:
+            handle.flush()
+        except Exception:
+            pass
+    finally:
+        handle.close()
     file_obj.position = pos + len(data)
+    file_obj.file_size = get_file_size(file_obj.path)
     return True
 
 

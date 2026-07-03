@@ -1,3 +1,6 @@
+import sys
+from gc import collect, mem_free
+
 class AppLoader:
     """Class to manage loading and running apps dynamically"""
 
@@ -25,9 +28,6 @@ class AppLoader:
     def cleanup_modules(self):
         """Remove all app modules from sys.modules"""
         try:
-            import sys
-            from gc import collect, mem_free
-
             # Clear our references first
             self.loaded_apps.clear()
             self.current_app = None
@@ -112,8 +112,6 @@ class AppLoader:
                 # Use the board-specific VFS prefix (/sdcard on Cardputer, /sd elsewhere)
                 base_apps_path = f"{storage.vfs_prefix}/picoware/apps"
 
-                import sys
-
                 # Always add the base apps directory to sys.path
                 if base_apps_path not in sys.path:
                     sys.path.append(base_apps_path)
@@ -133,7 +131,7 @@ class AppLoader:
                 )
 
                 self.view_manager.log(
-                    f"[AppLoader]: Imported {app_name} after {ticks_ms() - start_time} ms"
+                    f"[AppLoader]: Imported {app_name} after {ticks_ms() - start_time} ms, free memory: {mem_free()} bytes"
                 )
 
                 # Verify the app has required methods

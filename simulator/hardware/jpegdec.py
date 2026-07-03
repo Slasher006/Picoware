@@ -30,15 +30,37 @@ class JPEGDecoder:
 
     def _detect_size(self, data):
         """Parse JPEG header for width and height."""
-        i = 0
+        if not data or len(data) < 4 or data[0] != 0xFF or data[1] != 0xD8:
+            return (False, 0, 0)
+        i = 2
         size = len(data)
         while i + 9 < size:
-            if data[i] == 0xFF and data[i + 1] in (0xC0, 0xC1, 0xC2):
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            while marker == 0xFF and i + 2 < size:
+                i += 1
+                marker = data[i + 1]
+            if marker in (0xC0, 0xC1, 0xC2):
+                if i + 8 >= size:
+                    break
                 h = (data[i + 5] << 8) | data[i + 6]
                 w = (data[i + 7] << 8) | data[i + 8]
                 return (True, w, h)
-            i += 1
-        return (True, 160, 120)
+            if marker == 0xD9 or marker == 0xDA:
+                break
+            if marker == 0xD8 or marker == 0x01 or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            if i + 4 > size:
+                break
+            seg_len = (data[i + 2] << 8) | data[i + 3]
+            if seg_len > 1:
+                i += seg_len + 2
+                continue
+            i += 2
+        return (False, 0, 0)
 
     def open_file(self, path):
         """Load a JPEG from the given path."""
@@ -47,15 +69,15 @@ class JPEGDecoder:
             return False
         self._data = data
         self._info = self._detect_size(data)
-        self._opened = True
-        return True
+        self._opened = self._info[0]
+        return self._opened
 
     def open_RAM(self, data):
         """Load JPEG data from a bytes buffer."""
         self._data = bytes(data)
         self._info = self._detect_size(self._data)
-        self._opened = True
-        return True
+        self._opened = self._info[0]
+        return self._opened
 
     def getinfo(self, data=None):
         """Return (ok, width, height) for the loaded or given JPEG."""
@@ -89,28 +111,68 @@ class JPEGDecoder:
         """Shell-quote a value for os.system."""
         return "'" + str(value).replace("'", "'\"'\"'") + "'"
 
+    def _helper_path(self):
+        """Return the preferred native JPEG helper path, building it if needed."""
+        candidates = (
+            sim_runtime.root + "/simulator/jpeg/sim_jpeg_decode",
+            sim_runtime.root + "/sim_mp/jpeg/sim_jpeg_decode",
+        )
+        for path in candidates:
+            if self._file_exists(path):
+                return path
+        try:
+            if sim_runtime.build_native("jpeg"):
+                for path in candidates:
+                    if self._file_exists(path):
+                        return path
+        except Exception as e:
+            print("[sim:jpeg] helper build failed:", e)
+        return ""
+
+    def _file_exists(self, path):
+        try:
+            os.stat(path)
+            return True
+        except OSError:
+            return False
+
+    def _draw_with_helper(self, in_path, out_path, scale):
+        helper = self._helper_path()
+        if not helper:
+            return False
+        cmd = "{} {} {} {}".format(
+            self._quote(helper),
+            self._quote(in_path),
+            self._quote(out_path),
+            int(scale),
+        )
+        return os.system(cmd) == 0
+
     def _draw_jpeg_bytes(self, data, x, y, option=0):
-        """Decode JPEG bytes via djpeg and blit to LCD."""
+        """Decode JPEG bytes with the native helper or djpeg, then blit to LCD."""
         lcd = getattr(sim_runtime, "_lcd", None)
         if lcd is None:
             return True
-        if not data:
-            return self._draw_placeholder(x, y)
-        token = str(id(data))
-        in_path = "/tmp/picoware-jpegdec-" + token + ".jpg"
-        out_path = "/tmp/picoware-jpegdec-" + token + ".bmp"
+        self._info = self._detect_size(data)
+        if not self._info[0]:
+            self._draw_placeholder(x, y)
+            return False
+        ident = str(id(data))
+        in_path = "/tmp/picoware-jpegdec-" + ident + ".jpg"
+        out_path = "/tmp/picoware-jpegdec-" + ident + ".bmp"
         try:
             with open(in_path, "wb") as handle:
                 handle.write(data)
             scale = int(option) if option else 1
             if scale not in (1, 2, 4, 8):
                 scale = 1
-            cmd = "djpeg -bmp -scale 1/{} -outfile {} {}".format(
-                scale, self._quote(out_path), self._quote(in_path)
-            )
-            rc = os.system(cmd)
-            if rc != 0:
-                return self._draw_placeholder(x, y)
+            if not self._draw_with_helper(in_path, out_path, scale):
+                cmd = "djpeg -bmp -scale 1/{} -outfile {} {}".format(
+                    scale, self._quote(out_path), self._quote(in_path)
+                )
+                if os.system(cmd) != 0:
+                    self._draw_placeholder(x, y)
+                    return False
             ok = lcd._bmp(int(x), int(y), out_path)
             lcd.swap()
             return ok
@@ -143,7 +205,7 @@ class JPEGDecoder:
         self._split_data = bytearray(int(fsize))
         self._split_data[: len(buf)] = buf
         self._info = self._detect_size(bytes(buf))
-        return (True, self._info[1], self._info[2])
+        return self._info
 
     def decode_split_buffer(self, index, position, buf):
         """Feed a chunk into the progressive JPEG decoder."""

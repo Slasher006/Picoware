@@ -11,14 +11,16 @@ status=0
 
 usage() {
     cat <<EOF
-usage: sh sim_mp/build.sh [--force] [--clean] [--check] [target...]
+usage: sh simulator/build.sh [--force] [--clean] [--check] [target...]
 
 targets:
   all              build/check every simulator native helper
-  viewer           sim_mp/viewer/sdl_fb_viewer
+  viewer           simulator/viewer/sdl_fb_viewer
   audio            both local audio and radio audio sidecars
-  audio-player     sim_mp/audio/sdl_audio_player
-  radio-player     sim_mp/audio/sdl_radio_player
+  audio-player     simulator/audio/sdl_audio_player
+  radio-player     simulator/audio/sdl_radio_player
+  jpeg             simulator/jpeg/sim_jpeg_decode
+  gameboy          simulator/gameboy/sim_gameboy_runner
 EOF
 }
 
@@ -240,6 +242,14 @@ compile_plain() {
     cc -O2 -o "$binary" "$source"
 }
 
+compile_cxx() {
+    binary=$1
+    source=$2
+    shift 2
+    log "[sim-build] c++ $binary"
+    c++ -O2 -D__LINUX__ -o "$binary" "$source" "$@"
+}
+
 check_or_build() {
     name=$1
     binary=$2
@@ -259,6 +269,8 @@ check_or_build() {
         fi
         if [ "$build_kind" = "sdl" ]; then
             compile_sdl "$binary" "$source" || status=1
+        elif [ "$build_kind" = "cxx" ]; then
+            compile_cxx "$binary" "$source" "$@" || status=1
         else
             compile_plain "$binary" "$source" || status=1
         fi
@@ -293,12 +305,34 @@ build_radio_player() {
         "$root_dir"/src/MicroPython/audio/minimp3/*.h
 }
 
+build_jpeg() {
+    check_or_build \
+        "jpeg" \
+        "$sim_dir/jpeg/sim_jpeg_decode" \
+        "cxx" \
+        "$sim_dir/jpeg/sim_jpeg_decode.cpp" \
+        "$root_dir/src/MicroPython/JPEGDEC/src/JPEGDEC.cpp"
+}
+
+build_gameboy() {
+    check_or_build \
+        "gameboy" \
+        "$sim_dir/gameboy/sim_gameboy_runner" \
+        "sdl" \
+        "$sim_dir/gameboy/sim_gameboy_runner.c" \
+        "$root_dir/src/MicroPython/gameboy/PicoCalc-GameBoy/ext/Walnut-CGB/walnut_cgb.h" \
+        "$root_dir/src/MicroPython/gameboy/PicoCalc-GameBoy/ext/minigb_apu/minigb_apu.c" \
+        "$root_dir/src/MicroPython/gameboy/PicoCalc-GameBoy/ext/minigb_apu/minigb_apu.h"
+}
+
 run_target() {
     case "$1" in
         all)
             build_viewer
             build_audio_player
             build_radio_player
+            build_jpeg
+            build_gameboy
             ;;
         viewer)
             build_viewer
@@ -312,6 +346,12 @@ run_target() {
             ;;
         radio-player)
             build_radio_player
+            ;;
+        jpeg)
+            build_jpeg
+            ;;
+        gameboy)
+            build_gameboy
             ;;
         *)
             usage
@@ -354,7 +394,9 @@ if [ "$mode" = "clean" ]; then
     rm -f \
         "$sim_dir/viewer/sdl_fb_viewer" \
         "$sim_dir/audio/sdl_audio_player" \
-        "$sim_dir/audio/sdl_radio_player"
+        "$sim_dir/audio/sdl_radio_player" \
+        "$sim_dir/jpeg/sim_jpeg_decode" \
+        "$sim_dir/gameboy/sim_gameboy_runner"
     log "[sim-build] removed simulator native binaries"
     exit 0
 fi

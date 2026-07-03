@@ -160,7 +160,7 @@ def _parse_args(argv):
             i += 1
             opts["record"] = _abspath(argv[i])
         elif arg == "--help":
-            print("usage: micropython sim_mp/run.py [--viewer] [--sdl] [--headless] [--frames N] [--exit-after-frames N] [--speed auto|real|pico2w|fast|unlimited] [--fps N] [--network real|offline] [--bluetooth virtual|off] [--audio real|silent] [--keys a,b] [--keys-text TEXT] [--record FILE] [--open NAME] [--app NAME] [--game NAME] [--apps-source PATH] [--reset-sd] [--sd-profile clean|dev|media|network-fixtures] [--screenshot PATH] [--coverage apps|games|all] [--script FILE] [--wait-view NAME] [--assert-text TEXT] [--capabilities] [--sim-check]")
+            print("usage: micropython simulator/run.py [--viewer] [--sdl] [--headless] [--frames N] [--exit-after-frames N] [--speed auto|real|pico2w|fast|unlimited] [--fps N] [--network real|offline] [--bluetooth virtual|off] [--audio real|silent] [--keys a,b] [--keys-text TEXT] [--record FILE] [--open NAME] [--app NAME] [--game NAME] [--apps-source PATH] [--reset-sd] [--sd-profile clean|dev|media|network-fixtures] [--screenshot PATH] [--coverage apps|games|all] [--script FILE] [--wait-view NAME] [--assert-text TEXT] [--capabilities] [--sim-check]")
             raise SystemExit
         else:
             print("Unknown argument:", arg)
@@ -219,7 +219,7 @@ def _safe_reset_sd(path):
     allowed = target == sim_default or target.startswith("/tmp/")
     if not allowed:
         print("--reset-sd refused unsafe path:", target)
-        print("Use the default sim_mp/sdcard or a path under /tmp for destructive reset.")
+        print("Use the default simulator/sdcard or a path under /tmp for destructive reset.")
         raise SystemExit(2)
     if target in ("", "/", "/tmp", THIS_DIR, ROOT):
         print("--reset-sd refused root-like path:", target)
@@ -392,7 +392,7 @@ def _run_sim_check(opts):
         + _quote(opts["apps_source"]),
         "micropython "
         + _quote(THIS_DIR + "/run.py")
-        + " --headless --app VibesMP --frames 120 --audio silent --network offline --sd "
+        + " --headless --app Calculator --frames 120 --audio silent --network offline --sd "
         + _quote(opts["sd"])
         + " --apps-source "
         + _quote(opts["apps_source"]),
@@ -470,7 +470,7 @@ def _start_viewer(opts):
     binary = THIS_DIR + "/viewer/sdl_fb_viewer"
 
     if not _build_native("viewer"):
-        print("Could not build SDL viewer. Run: sh sim_mp/build.sh viewer")
+        print("Could not build SDL viewer. Run: sh simulator/build.sh viewer")
         raise SystemExit
 
     try:
@@ -572,26 +572,31 @@ def main():
     if opts["capabilities"]:
         sim_runtime.print_capabilities()
         return
-    if opts["open"]:
-        sim_runtime.request_open(opts["open"])
-    if opts["app"]:
-        sim_runtime.request_app(opts["app"])
-    if opts["game"]:
-        sim_runtime.request_game(opts["game"])
+    try:
+        if opts["open"]:
+            sim_runtime.request_open(opts["open"])
+        if opts["app"]:
+            sim_runtime.request_app(opts["app"])
+        if opts["game"]:
+            sim_runtime.request_game(opts["game"])
 
-    delayed_input = bool(opts["open"] or opts["app"] or opts["game"])
-    if opts["keys_text"]:
-        if delayed_input:
-            sim_runtime.schedule_text(80, opts["keys_text"])
-        else:
-            sim_runtime.enqueue_text(opts["keys_text"])
-    if opts["keys"]:
-        if delayed_input:
-            sim_runtime.schedule_key_names(81, opts["keys"])
-        else:
-            sim_runtime.enqueue_key_names(opts["keys"])
-    if opts["script"]:
-        sim_runtime.run_script_file(opts["script"])
+        delayed_input = bool(opts["open"] or opts["app"] or opts["game"])
+        delayed_loops = 180 if opts["app"] or opts["game"] else 120
+        if opts["keys_text"]:
+            if delayed_input:
+                sim_runtime.schedule_text(delayed_loops, opts["keys_text"])
+            else:
+                sim_runtime.enqueue_text(opts["keys_text"])
+        if opts["keys"]:
+            if delayed_input:
+                sim_runtime.schedule_key_names(delayed_loops + 1, opts["keys"])
+            else:
+                sim_runtime.enqueue_key_names(opts["keys"])
+        if opts["script"]:
+            sim_runtime.run_script_file(opts["script"])
+    except sim_runtime.LaunchTargetError as e:
+        print("[sim:launch:fail]", e)
+        raise SystemExit(2)
 
     restart_requested = False
     restart_reset_sd = False

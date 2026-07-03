@@ -239,9 +239,18 @@ class LCD:
                     return
                 value = data[idx]
                 if value:
-                    c = 0xFFFF if value > 1 else 0xFFFF
-                    self._set_pixel(int(x) + xx, int(y) + yy, c)
+                    self._set_pixel(int(x) + xx, int(y) + yy, self._rgb332_to_565(value))
                 idx += 1
+
+    def _rgb332_to_565(self, value):
+        value = int(value) & 0xFF
+        r3 = (value >> 5) & 0x07
+        g3 = (value >> 2) & 0x07
+        b2 = value & 0x03
+        r8 = (r3 * 255) // 7
+        g8 = (g3 * 255) // 7
+        b8 = (b2 * 255) // 3
+        return self._rgb_to_565(r8, g8, b8)
 
     def _bmp(self, x, y, path):
         try:

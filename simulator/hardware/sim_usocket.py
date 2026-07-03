@@ -145,7 +145,10 @@ class _Socket:
                     self._websocket = True
             return len(data)
         self._ensure_real()
-        return self._real.write(data)
+        try:
+            return self._real.write(data)
+        except AttributeError:
+            return self._real.send(data)
 
     def send(self, data):
         if self._fixture:
@@ -187,7 +190,18 @@ class _Socket:
             self._offset = end + 1
             return data
         self._ensure_real()
-        return self._real.readline()
+        try:
+            return self._real.readline()
+        except AttributeError:
+            chunks = []
+            while True:
+                data = self._real.recv(1)
+                if not data:
+                    break
+                chunks.append(data)
+                if data == b"\n":
+                    break
+            return b"".join(chunks)
 
     def read(self, count=-1):
         if self._fixture:
@@ -283,6 +297,27 @@ def _url_decode(value):
                 pass
         out += value[i]
         i += 1
+    return out
+
+
+def _json_escape(value):
+    out = ""
+    for ch in str(value):
+        code = ord(ch)
+        if ch == "\\":
+            out += "\\\\"
+        elif ch == '"':
+            out += '\\"'
+        elif ch == "\n":
+            out += "\\n"
+        elif ch == "\r":
+            out += "\\r"
+        elif ch == "\t":
+            out += "\\t"
+        elif code < 32:
+            out += "\\u%04x" % code
+        else:
+            out += ch
     return out
 
 
@@ -417,6 +452,9 @@ def _websocket_frames(data):
 def _wikipedia_response(path):
     title = _query_value(path, "titles") or _query_value(path, "title") or "MicroPython"
     search = _query_value(path, "srsearch") or "MicroPython"
+    pageid = _query_value(path, "pageids") or "1"
+    title_json = _json_escape(title)
+    search_json = _json_escape(search)
     if "list=random" in path:
         return _json_response('{"query":{"random":[{"id":1,"ns":0,"title":"MicroPython"}]}}')
     if "list=search" in path:
@@ -424,22 +462,26 @@ def _wikipedia_response(path):
             '{"query":{"search":[{"pageid":1,"title":"MicroPython","snippet":"Python for microcontrollers"},'
             '{"pageid":2,"title":"Raspberry Pi Pico","snippet":"RP2040 development board"},'
             '{"pageid":3,"title":"Picoware","snippet":"Simulator fixture result for '
-            + search
+            + search_json
             + '"}]}}'
         )
         return _json_response(body)
     if "prop=links" in path:
         body = (
-            '{"query":{"pages":[{"pageid":1,"title":"'
-            + title
+            '{"query":{"pages":[{"pageid":'
+            + pageid
+            + ',"title":"'
+            + title_json
             + '","links":[{"ns":0,"title":"Python"},{"ns":0,"title":"Microcontroller"},{"ns":0,"title":"Raspberry Pi Pico"}]}]}}'
         )
         return _json_response(body)
     body = (
-        '{"query":{"pages":[{"pageid":1,"title":"'
-        + title
+        '{"query":{"pages":[{"pageid":'
+        + pageid
+        + ',"title":"'
+        + title_json
         + '","extract":"'
-        + title
+        + title_json
         + ' article from the Picoware simulator fixture. This text is returned by the MicroPython usocket shim so WikiReader can be tested without external network access.\\n\\n== Development ==\\nNavigation, scrolling, and article rendering should work here."}]}}'
     )
     return _json_response(body)

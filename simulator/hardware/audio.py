@@ -127,8 +127,7 @@ class Audio:
         try:
             import sim_runtime
 
-            player_dir = sim_runtime.root + "/sim_mp/audio"
-            binary = player_dir + "/sdl_audio_player"
+            binary = sim_runtime.native_helper_path("audio/sdl_audio_player", "audio-player")
             if not sim_runtime.build_native("audio-player"):
                 print("[sim:audio] could not build SDL audio player")
                 return ""
@@ -141,8 +140,7 @@ class Audio:
         try:
             import sim_runtime
 
-            player_dir = sim_runtime.root + "/sim_mp/audio"
-            binary = player_dir + "/sdl_radio_player"
+            binary = sim_runtime.native_helper_path("audio/sdl_radio_player", "radio-player")
             if not sim_runtime.build_native("radio-player"):
                 print("[sim:audio] could not build SDL radio player")
                 return ""

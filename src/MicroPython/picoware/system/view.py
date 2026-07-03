@@ -25,8 +25,7 @@ class View:
         buf = io.StringIO()
         sys.print_exception(exception, buf)
         traceback_str = buf.getvalue()
-        print(traceback_str)
-        view_manager.alert(f"{traceback_str}", False)
+        view_manager.alert(f"{traceback_str}", False) 
 
     def start(self, view_manager) -> bool:
         """Called when the view is created."""
@@ -37,8 +36,7 @@ class View:
                     self.active = True
                     return True
             except Exception as e:
-                print("Error starting view:", e)
-                self.__alert(e, view_manager)
+                self.__alert(f"Error starting view: {e}", view_manager)
                 self.active = False
                 return False
         return False
@@ -49,8 +47,7 @@ class View:
             try:
                 self._stop(view_manager)
             except Exception as e:
-                print("Error stopping view:", e)
-                self.__alert(e, view_manager)
+                self.__alert(f"Error stopping view: {e}", view_manager)
         self.active = False
         self.should_stop = True
 
@@ -63,8 +60,7 @@ class View:
             try:
                 self._run(view_manager)
             except Exception as e:
-                print("Error running view:", e)
-                self.__alert(e, view_manager)
+                self.__alert(f"Error running view: {e}", view_manager)
                 self.active = False
                 self.should_stop = True
                 view_manager.back()

@@ -41,6 +41,13 @@ class Pin:
     def irq(self, handler=None, trigger=None):
         self._handler = handler
         self._irq_trigger = trigger
+        if self.id in (11, 20, 21):
+            try:
+                import sim_runtime
+
+                sim_runtime.register_touch_callback(handler)
+            except Exception:
+                pass
         return None
 
     def value(self, value=None):
@@ -72,6 +79,256 @@ class RTC:
 
     def deinit(self):
         return None
+
+
+class I2C:
+    _devices = {}
+
+    def __init__(self, id=0, *, scl=None, sda=None, freq=400000, **kwargs):
+        self.id = id
+        self.scl = scl
+        self.sda = sda
+        self.freq = int(freq)
+        self._active = True
+
+    @classmethod
+    def set_device(cls, addr, data=b""):
+        cls._devices[int(addr)] = bytearray(data)
+
+    def init(self, *, scl=None, sda=None, freq=400000, **kwargs):
+        if scl is not None:
+            self.scl = scl
+        if sda is not None:
+            self.sda = sda
+        self.freq = int(freq)
+        self._active = True
+        return None
+
+    def deinit(self):
+        self._active = False
+        return None
+
+    def scan(self):
+        return sorted(I2C._devices.keys())
+
+    def writeto(self, addr, buf, stop=True):
+        data = bytes(buf)
+        I2C._devices[int(addr)] = bytearray(data)
+        return len(data)
+
+    def readfrom(self, addr, nbytes, stop=True):
+        data = I2C._devices.get(int(addr), bytearray())
+        out = bytes(data[: int(nbytes)])
+        if len(out) < int(nbytes):
+            out += b"\x00" * (int(nbytes) - len(out))
+        return out
+
+    def readfrom_into(self, addr, buf, stop=True):
+        data = self.readfrom(addr, len(buf), stop)
+        buf[: len(data)] = data
+        return None
+
+    def writeto_mem(self, addr, memaddr, buf, *, addrsize=8):
+        addr = int(addr)
+        memaddr = int(memaddr)
+        data = bytes(buf)
+        device = I2C._devices.setdefault(addr, bytearray())
+        end = memaddr + len(data)
+        if len(device) < end:
+            device.extend(b"\x00" * (end - len(device)))
+        device[memaddr:end] = data
+        return None
+
+    def readfrom_mem(self, addr, memaddr, nbytes, *, addrsize=8):
+        addr = int(addr)
+        memaddr = int(memaddr)
+        data = I2C._devices.get(addr, bytearray())
+        out = bytes(data[memaddr : memaddr + int(nbytes)])
+        if len(out) < int(nbytes):
+            out += b"\x00" * (int(nbytes) - len(out))
+        return out
+
+    def readfrom_mem_into(self, addr, memaddr, buf, *, addrsize=8):
+        data = self.readfrom_mem(addr, memaddr, len(buf), addrsize=addrsize)
+        buf[: len(data)] = data
+        return None
+
+
+class SPI:
+    MSB = 0
+    LSB = 1
+
+    def __init__(
+        self,
+        id=0,
+        baudrate=1000000,
+        polarity=0,
+        phase=0,
+        bits=8,
+        firstbit=MSB,
+        sck=None,
+        mosi=None,
+        miso=None,
+        **kwargs
+    ):
+        self.id = id
+        self._rx = bytearray()
+        self._tx = bytearray()
+        self.init(
+            baudrate=baudrate,
+            polarity=polarity,
+            phase=phase,
+            bits=bits,
+            firstbit=firstbit,
+            sck=sck,
+            mosi=mosi,
+            miso=miso,
+        )
+
+    def init(self, **kwargs):
+        self.baudrate = int(kwargs.get("baudrate", getattr(self, "baudrate", 1000000)))
+        self.polarity = int(kwargs.get("polarity", getattr(self, "polarity", 0)))
+        self.phase = int(kwargs.get("phase", getattr(self, "phase", 0)))
+        self.bits = int(kwargs.get("bits", getattr(self, "bits", 8)))
+        self.firstbit = kwargs.get("firstbit", getattr(self, "firstbit", self.MSB))
+        self.sck = kwargs.get("sck", getattr(self, "sck", None))
+        self.mosi = kwargs.get("mosi", getattr(self, "mosi", None))
+        self.miso = kwargs.get("miso", getattr(self, "miso", None))
+        self._active = True
+        return None
+
+    def deinit(self):
+        self._active = False
+        return None
+
+    def write(self, buf):
+        data = bytes(buf)
+        self._tx.extend(data)
+        self._rx.extend(data)
+        return None
+
+    def read(self, nbytes, write=0x00):
+        nbytes = int(nbytes)
+        out = bytes(self._rx[:nbytes])
+        self._rx = self._rx[nbytes:]
+        if len(out) < nbytes:
+            out += bytes((int(write) & 0xFF,)) * (nbytes - len(out))
+        return out
+
+    def readinto(self, buf, write=0x00):
+        data = self.read(len(buf), write)
+        buf[: len(data)] = data
+        return None
+
+    def write_readinto(self, write_buf, read_buf):
+        data = bytes(write_buf)
+        self._tx.extend(data)
+        size = min(len(data), len(read_buf))
+        read_buf[:size] = data[:size]
+        if len(read_buf) > size:
+            read_buf[size:] = b"\x00" * (len(read_buf) - size)
+        return None
+
+
+class ADC:
+    _values = {}
+
+    def __init__(self, pin):
+        self.pin = pin
+
+    @classmethod
+    def set_value(cls, pin, value):
+        key = getattr(pin, "id", pin)
+        cls._values[key] = max(0, min(65535, int(value)))
+
+    def read_u16(self):
+        key = getattr(self.pin, "id", self.pin)
+        return ADC._values.get(key, 32768)
+
+
+class Timer:
+    ONE_SHOT = 0
+    PERIODIC = 1
+    _timers = []
+
+    def __init__(self, id=-1):
+        self.id = id
+        self._active = False
+        self._period = 0
+        self._mode = self.ONE_SHOT
+        self._callback = None
+        self._next_ms = 0
+        Timer._timers.append(self)
+
+    def init(self, *, mode=PERIODIC, period=-1, freq=-1, callback=None):
+        if period < 0 and freq and freq > 0:
+            period = max(1, int(1000 / int(freq)))
+        self._period = max(1, int(period if period >= 0 else 1))
+        self._mode = mode
+        self._callback = callback
+        self._next_ms = _ticks_ms() + self._period
+        self._active = True
+        return None
+
+    def deinit(self):
+        self._active = False
+        return None
+
+    def _poll(self, now=None):
+        if not self._active:
+            return False
+        if now is None:
+            now = _ticks_ms()
+        if now < self._next_ms:
+            return False
+        if self._callback:
+            self._callback(self)
+        if self._mode == self.ONE_SHOT:
+            self._active = False
+        else:
+            self._next_ms = now + self._period
+        return True
+
+    @classmethod
+    def poll_all(cls):
+        now = _ticks_ms()
+        count = 0
+        for timer in list(cls._timers):
+            if timer._poll(now):
+                count += 1
+        return count
+
+
+class WDT:
+    _instances = []
+
+    def __init__(self, id=0, timeout=5000):
+        self.id = id
+        self.timeout = int(timeout)
+        self._last_feed = _ticks_ms()
+        self._expired = False
+        WDT._instances.append(self)
+
+    def feed(self):
+        self._last_feed = _ticks_ms()
+        self._expired = False
+        return None
+
+    def expired(self):
+        if not self._expired and _ticks_ms() - self._last_feed > self.timeout:
+            self._expired = True
+        return self._expired
+
+    @classmethod
+    def check_all(cls):
+        return [wdt for wdt in cls._instances if wdt.expired()]
+
+
+def _ticks_ms():
+    try:
+        return time.ticks_ms()
+    except AttributeError:
+        return int(time.time() * 1000)
 
 
 class UART:
@@ -262,6 +519,9 @@ class USBDevice:
         self.control_xfer_cb = None
         self.xfer_cb = None
         self.transfers = []
+        self.control_transfers = []
+        self._open_interfaces = set()
+        self._host_packets = {}
 
     def active(self, value=None):
         if value is None:
@@ -269,6 +529,9 @@ class USBDevice:
         self._active = bool(value)
         if self._active and self.reset_cb:
             self.reset_cb()
+        if not self._active:
+            self._open_interfaces.clear()
+            self._host_packets.clear()
         return None
 
     def config(self, **kwargs):
@@ -277,15 +540,24 @@ class USBDevice:
         return None
 
     def submit_xfer(self, ep, data):
+        if not self._active:
+            return False
         data = bytes(data)
-        self.transfers.append((ep, data))
+        entry = {
+            "ep": ep,
+            "data": data,
+            "direction": "in" if ep & 0x80 else "out",
+            "type": self._classify_xfer(ep, data),
+            "status": 0,
+        }
+        self.transfers.append(entry)
         try:
             import sim_runtime
 
             path = sim_runtime.sd_root + "/picoware/usb_hid.log"
             sim_runtime.mkdir_p(path.rsplit("/", 1)[0])
             with open(path, "a") as handle:
-                handle.write("{}:{}\n".format(ep, data.hex()))
+                handle.write("{}:{}:{}\n".format(ep, entry["type"], data.hex()))
         except Exception:
             pass
         if self.xfer_cb:
@@ -293,9 +565,68 @@ class USBDevice:
         return True
 
     def control_xfer(self, stage, request):
+        request = bytes(request)
+        self.control_transfers.append((stage, request))
         if self.control_xfer_cb:
             return self.control_xfer_cb(stage, request)
         return False
+
+    def open_itf(self, itf_num=0):
+        self._open_interfaces.add(itf_num)
+        if self.open_itf_cb:
+            return self.open_itf_cb(itf_num)
+        return True
+
+    def host_open_interface(self, itf_num=0):
+        return self.open_itf(itf_num)
+
+    def host_control(self, stage, request):
+        return self.control_xfer(stage, request)
+
+    def host_receive(self, ep, data):
+        data = bytes(data)
+        self._host_packets.setdefault(ep, []).append(data)
+        if self.xfer_cb:
+            self.xfer_cb(ep, 0, len(data))
+        return True
+
+    def recv_xfer(self, ep, size=None):
+        queue = self._host_packets.get(ep, [])
+        if not queue:
+            return b""
+        data = queue.pop(0)
+        if size is not None:
+            return data[:size]
+        return data
+
+    def transfer_log(self, ep=None):
+        if ep is None:
+            return tuple(self.transfers)
+        return tuple(item for item in self.transfers if item["ep"] == ep)
+
+    def last_transfer(self, ep=None):
+        transfers = self.transfer_log(ep)
+        if not transfers:
+            return None
+        return transfers[-1]
+
+    def clear_transfers(self):
+        self.transfers = []
+        self.control_transfers = []
+        self._host_packets = {}
+        return None
+
+    def opened_interfaces(self):
+        return tuple(sorted(self._open_interfaces))
+
+    def _classify_xfer(self, ep, data):
+        if ep & 0x80:
+            if len(data) == 8:
+                return "hid-keyboard"
+            if len(data) == 2:
+                return "hid-consumer"
+            return "device-in"
+        return "host-out"
 
 
 def _append_log(name, data, binary=False):

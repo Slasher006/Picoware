@@ -92,6 +92,89 @@ def _adv_payload(name, services=()):
     return bytes(payload)
 
 
+def _default_devices():
+    return [
+        {
+            "addr_type": 0,
+            "addr": b"\x02\x50\x43\x57\x10\x01",
+            "adv_type": 0,
+            "rssi": -41,
+            "adv_data": _adv_payload("Picoware-Chat", (_UART_SERVICE_UUID,)),
+            "connectable": True,
+            "name": "Picoware-Chat",
+        },
+        {
+            "addr_type": 1,
+            "addr": b"\x02\x50\x43\x57\x10\x02",
+            "adv_type": 0,
+            "rssi": -58,
+            "adv_data": _adv_payload("Picoware-Beacon", ()),
+            "connectable": True,
+            "name": "Picoware-Beacon",
+        },
+        {
+            "addr_type": 1,
+            "addr": b"\x02\x50\x43\x57\x10\x03",
+            "adv_type": 3,
+            "rssi": -72,
+            "adv_data": _adv_payload("SensorTag", (0x180F,)),
+            "connectable": True,
+            "name": "SensorTag",
+        },
+    ]
+
+
+_scan_devices = _default_devices()
+_advertisements = []
+
+
+def sim_reset():
+    global _scan_devices, _advertisements
+    _scan_devices = _default_devices()
+    _advertisements = []
+
+
+def sim_clear_scan_devices():
+    _scan_devices[:] = []
+
+
+def sim_add_scan_device(
+    name="Picoware-Sim",
+    addr=b"\x02\x50\x43\x57\x30\x01",
+    addr_type=0,
+    adv_type=0,
+    rssi=-50,
+    services=(),
+    connectable=True,
+    adv_data=None,
+):
+    if adv_data is None:
+        adv_data = _adv_payload(name, services)
+    device = {
+        "addr_type": addr_type,
+        "addr": bytes(addr),
+        "adv_type": adv_type,
+        "rssi": rssi,
+        "adv_data": bytes(adv_data),
+        "connectable": bool(connectable),
+        "name": name,
+    }
+    _scan_devices.append(device)
+    return device
+
+
+def sim_advertisements():
+    return tuple(_advertisements)
+
+
+def _find_scan_device(addr):
+    addr = bytes(addr)
+    for device in _scan_devices:
+        if device["addr"] == addr:
+            return device
+    return None
+
+
 class BLE:
     def __init__(self):
         self._active = False
@@ -133,19 +216,31 @@ class BLE:
         if sim_runtime.bluetooth_mode == "off":
             self._emit(_IRQ_SCAN_DONE, None)
             return None
-        devices = (
-            (0, b"\x02\x50\x43\x57\x10\x01", 0, -41, _adv_payload("Picoware-Chat", (_UART_SERVICE_UUID,))),
-            (1, b"\x02\x50\x43\x57\x10\x02", 0, -58, _adv_payload("Picoware-Beacon", ())),
-            (1, b"\x02\x50\x43\x57\x10\x03", 3, -72, _adv_payload("SensorTag", (0x180F,))),
-        )
-        for item in devices:
-            self._emit(_IRQ_SCAN_RESULT, item)
+        for device in _scan_devices:
+            self._emit(
+                _IRQ_SCAN_RESULT,
+                (
+                    device["addr_type"],
+                    device["addr"],
+                    device["adv_type"],
+                    device["rssi"],
+                    device["adv_data"],
+                ),
+            )
         self._emit(_IRQ_SCAN_DONE, None)
         return None
 
     def gap_connect(self, addr_type, addr, timeout_ms=10000):
-        self._conn_handle = 1
         addr = bytes(addr)
+        device = _find_scan_device(addr)
+        if (
+            sim_runtime.bluetooth_mode == "off"
+            or device is None
+            or not device.get("connectable", True)
+        ):
+            self._emit(_IRQ_PERIPHERAL_DISCONNECT, (0, addr_type, addr))
+            return None
+        self._conn_handle = 1
         self._emit(_IRQ_PERIPHERAL_CONNECT, (self._conn_handle, addr_type, addr))
         self.gattc_discover_services(self._conn_handle)
         return None
@@ -162,7 +257,15 @@ class BLE:
     def gap_advertise(self, interval_us, adv_data=None, resp_data=None, connectable=True):
         self._advertising = interval_us is not None
         self._adv_data = adv_data or b""
-        if self._advertising and sim_runtime.bluetooth_mode != "off":
+        _advertisements.append(
+            {
+                "interval_us": interval_us,
+                "adv_data": bytes(self._adv_data),
+                "resp_data": bytes(resp_data or b""),
+                "connectable": bool(connectable),
+            }
+        )
+        if self._advertising and connectable and sim_runtime.bluetooth_mode != "off":
             self._emit(_IRQ_CENTRAL_CONNECT, (2, 0, b"\x02\x50\x43\x57\x20\x01"))
         return None
 

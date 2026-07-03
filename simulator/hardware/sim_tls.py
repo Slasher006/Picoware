@@ -39,16 +39,96 @@ class SSLContext:
             sock = sock._sim_real_socket()
         if self._context is not None:
             try:
+                if self.verify_mode == CERT_NONE and hasattr(self._context, "check_hostname"):
+                    self._context.check_hostname = False
                 self._context.verify_mode = self.verify_mode
             except Exception:
                 pass
-            return self._context.wrap_socket(sock, server_hostname=server_hostname)
+            return _wrap_compat(self._context.wrap_socket(sock, server_hostname=server_hostname))
         if _ssl is not None:
             try:
-                return _ssl.wrap_socket(sock, server_hostname=server_hostname)
+                return _wrap_compat(_ssl.wrap_socket(sock, server_hostname=server_hostname))
             except TypeError:
-                return _ssl.wrap_socket(sock)
+                return _wrap_compat(_ssl.wrap_socket(sock))
         return sock
+
+
+class _CompatSocket:
+    """Expose the small MicroPython stream API used by picoware.system.http."""
+
+    def __init__(self, sock):
+        self._sock = sock
+
+    def write(self, data):
+        if isinstance(data, str):
+            data = data.encode()
+        try:
+            return self._sock.write(data)
+        except AttributeError:
+            return self._sock.send(data)
+
+    def read(self, count=-1):
+        if count is None or count < 0:
+            chunks = []
+            while True:
+                data = self.recv(4096)
+                if not data:
+                    break
+                chunks.append(data)
+            return b"".join(chunks)
+        try:
+            return self._sock.read(count)
+        except AttributeError:
+            return self._sock.recv(count)
+
+    def readline(self):
+        chunks = []
+        while True:
+            data = self.read(1)
+            if not data:
+                break
+            chunks.append(data)
+            if data == b"\n":
+                break
+        return b"".join(chunks)
+
+    def recv(self, count):
+        try:
+            return self._sock.recv(count)
+        except AttributeError:
+            return self._sock.read(count)
+
+    def send(self, data):
+        return self.write(data)
+
+    def sendall(self, data):
+        if isinstance(data, str):
+            data = data.encode()
+        try:
+            return self._sock.sendall(data)
+        except AttributeError:
+            sent = 0
+            while sent < len(data):
+                n = self.write(data[sent:])
+                if n <= 0:
+                    raise OSError("socket send failed")
+                sent += n
+            return None
+
+    def settimeout(self, value):
+        return self._sock.settimeout(value)
+
+    def close(self):
+        return self._sock.close()
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+
+def _wrap_compat(sock):
+    if hasattr(sock, "readline") and hasattr(sock, "write"):
+        return sock
+    return _CompatSocket(sock)
 
 
 def wrap_socket(sock, *args, **kwargs):
@@ -59,4 +139,4 @@ def wrap_socket(sock, *args, **kwargs):
         sock = sock._sim_real_socket()
     if _ssl is None:
         return sock
-    return _ssl.wrap_socket(sock, *args, **kwargs)
+    return _wrap_compat(_ssl.wrap_socket(sock, *args, **kwargs))

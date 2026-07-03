@@ -314,11 +314,9 @@ def run(view_manager) -> None:
             try:
                 result = _agent.run_payload({
                     "message": user_text,
-                    "conversation": _conversation,
                 })
-                if result["status"] == "completed":
-                    _conversation = result["conversation"]
-                else:
+                _conversation = result["conversation"]
+                if result["status"] != "completed":
                     _conversation.append({
                         "role": "assistant",
                         "content": result["message"],

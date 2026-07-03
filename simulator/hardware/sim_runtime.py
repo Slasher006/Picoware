@@ -12,8 +12,12 @@ class RestartSimulation(SystemExit):
         self.reset = reset
 
 
+class LaunchTargetError(Exception):
+    pass
+
+
 root = "."
-sd_root = "sim_mp/sdcard"
+sd_root = "simulator/sdcard"
 apps_source = "builds/MicroPython/apps_unfrozen"
 scale = 2
 board = "picocalc-pico2w"
@@ -48,6 +52,7 @@ loop_count = 0
 open_target = ""
 _keys = []
 _delayed_keys = []
+_held_keys = {}
 _lcd = None
 _wait_view = ""
 _assert_text = ""
@@ -57,6 +62,10 @@ _current_view_name = ""
 _recent_text = []
 _recent_input = []
 _record_text = ""
+_touch_point = (0, 0)
+_touch_gesture = 0
+_touch_callbacks = []
+_battery_percentage = 87
 
 
 KEY_NAMES = {
@@ -67,14 +76,30 @@ KEY_NAMES = {
     "escape": 0xB1,
     "esc": 0xB1,
     "back": 0xB1,
+    "break": 0xD0,
+    "insert": 0xD1,
+    "ins": 0xD1,
     "backspace": 8,
+    "bs": 8,
     "enter": 13,
+    "return": 13,
     "center": 13,
     "newline": 13,
     "tab": 9,
     "home": 0xD2,
     "delete": 0xD4,
+    "del": 0xD4,
     "end": 0xD5,
+    "pageup": 0xD6,
+    "page-up": 0xD6,
+    "pgup": 0xD6,
+    "pagedown": 0xD7,
+    "page-down": 0xD7,
+    "pgdn": 0xD7,
+    "ctrl-up": 0xC2,
+    "ctrlup": 0xC2,
+    "ctrl-down": 0xC3,
+    "ctrldown": 0xC3,
     "f1": 0x81,
     "f2": 0x82,
     "f3": 0x83,
@@ -117,7 +142,7 @@ def configure(_root, _sd_root, _apps_source, _scale, _board, _max_frames, _headl
     global viewer, viewer_frame_path, viewer_keys_path, status_path, error_path, control_path, log_path, record_path
     global sd_profile, network_mode, bluetooth_mode, audio_mode
     global speed_mode, target_fps, _frame_interval_ms, _last_frame_ms, _viewer_key_offset, _last_status_ms, _control_offset, audio_muted
-    global frame_count, loop_count, open_target, _keys, _delayed_keys, _lcd
+    global frame_count, loop_count, open_target, _keys, _delayed_keys, _held_keys, _lcd
     global _wait_view, _assert_text, _seen_wait_view, _seen_assert_text, _current_view_name, _recent_text
     global _recent_input, _record_text
     root = _root
@@ -156,6 +181,7 @@ def configure(_root, _sd_root, _apps_source, _scale, _board, _max_frames, _headl
     open_target = ""
     _keys = []
     _delayed_keys = []
+    _held_keys = {}
     _lcd = None
     _wait_view = ""
     _assert_text = ""
@@ -202,7 +228,7 @@ def _resolve_frame_interval(mode, fps, is_headless, is_viewer):
         return 33
     if mode == "fast":
         return 0
-    # Keep automation fast by default, but make interactive runs real-time.
+    # Fast default, real-time interactive.
     if is_viewer or not is_headless:
         return 33
     return 0
@@ -251,9 +277,26 @@ def _quote(path):
 
 
 def build_native(target):
-    script = root + "/sim_mp/build.sh"
+    script = root + "/simulator/build.sh"
+    if not _exists(script):
+        script = root + "/sim_mp/build.sh"
     status = os.system("sh " + _quote(script) + " " + _quote(target))
     return status == 0
+
+
+def native_helper_path(relative, target=None):
+    candidates = (
+        root + "/simulator/" + relative,
+        root + "/sim_mp/" + relative,
+    )
+    for path in candidates:
+        if _exists(path):
+            return path
+    if target and build_native(target):
+        for path in candidates:
+            if _exists(path):
+                return path
+    return candidates[0]
 
 
 def _merge_json_defaults(path, defaults, fill_blank_keys=()):
@@ -360,20 +403,15 @@ def seed_sd(profile="dev"):
         _write_if_missing(sd_root + "/picoware/fixtures/github.json", '{"message":"Picoware simulator GitHub fixture","items":[]}')
         _write_if_missing(sd_root + "/picoware/wikireader/settings.json", '{"full_article":true,"language":"en","theme":"system","history":[],"favorites":[],"offline":[]}')
 
-    # Symlink app files into simulated SD for __import__
+    # Symlink apps for __import__
     _link_app_files()
 
 
 def _link_app_files():
-    """Symlink app files from both apps_unfrozen/ (.py source) and apps/
-    (.mpy compiled) into the simulated SD card at sd_root/picoware/apps/.
-    Recurses into subdirectories so that apps in subfolders (games,
-    flip_social, etc.) are also available.  This is needed because
-    __import__ searches sys.path via the raw VFS, not through sd_mp."""
+    """Symlink app sources into simulated SD for __import__."""
     target = sd_root + "/picoware/apps"
     _link_app_files_into(apps_source, target)
-    # Also link compiled .mpy files from the apps/ directory — subdirectory
-    # apps only exist as .mpy, not as .py in apps_unfrozen/.
+    # Link compiled .mpy subdirectory apps
     _compiled = root + "/builds/MicroPython/apps"
     if _compiled != apps_source:
         _link_app_files_into(_compiled, target, skip_if_py_exists=True)
@@ -403,16 +441,15 @@ def _link_app_files_into(src_dir, dst_dir, skip_if_py_exists=False):
         if st[0] & 0x4000:  # directory
             _link_app_files_into(src, dst, skip_if_py_exists)
         else:
-            # If we're linking .mpy files and a .py counterpart already
-            # exists in the destination, skip to avoid duplicates.
+            # Skip .mpy if .py exists
             if skip_if_py_exists and entry.endswith(".mpy"):
                 _py_name = entry[:-4] + ".py"
                 _py_dst = dst_dir + "/" + _py_name
                 if _exists(_py_dst):
                     continue
-            # Remove stale symlink / file before re-creating
+            # Remove stale symlink first
             _rm_f(dst)
-            # Try os.symlink, fall back to ln -sf
+            # Try symlink, fallback to ln
             try:
                 os.symlink(src, dst)
             except (AttributeError, OSError):
@@ -623,6 +660,14 @@ def has_key():
     return len(_keys) > 0
 
 
+def is_key_held(code):
+    poll_events()
+    try:
+        return bool(_held_keys.get(int(code), False))
+    except Exception:
+        return False
+
+
 def enqueue_key_names(text):
     parts = text.split(",")
     for raw in parts:
@@ -646,6 +691,47 @@ def enqueue_text(text):
             push_key(KEY_NAMES["tab"])
         else:
             push_key(ord(ch))
+
+
+def set_touch_point(x, y, gesture=0, notify=True):
+    global _touch_point, _touch_gesture
+    _touch_point = (int(x), int(y))
+    _touch_gesture = int(gesture)
+    if not notify:
+        return
+    for callback in list(_touch_callbacks):
+        try:
+            callback(None)
+        except Exception as e:
+            print("[sim:touch] callback failed:", e)
+
+
+def clear_touch():
+    set_touch_point(0, 0, 0, False)
+
+
+def touch_point():
+    return _touch_point
+
+
+def touch_gesture():
+    return _touch_gesture
+
+
+def register_touch_callback(callback):
+    if callback is None:
+        _touch_callbacks[:] = []
+    elif callback not in _touch_callbacks:
+        _touch_callbacks.append(callback)
+
+
+def set_battery_percentage(value):
+    global _battery_percentage
+    _battery_percentage = max(0, min(100, int(value)))
+
+
+def battery_percentage():
+    return _battery_percentage
 
 
 def run_script_file(path):
@@ -689,15 +775,30 @@ def run_script_file(path):
                 delay += 1
             else:
                 push_key(KEY_NAMES["back"])
+        elif command == "touch":
+            parts = value.replace(",", " ").split()
+            if len(parts) < 2:
+                raise ValueError("touch expects: touch X Y [GESTURE]")
+            gesture = int(parts[2]) if len(parts) > 2 else 6
+            set_touch_point(int(parts[0]), int(parts[1]), gesture)
+        elif command == "gesture":
+            parts = value.replace(",", " ").split()
+            if not parts:
+                raise ValueError("gesture expects: gesture CODE [X Y]")
+            x = int(parts[1]) if len(parts) > 1 else _touch_point[0]
+            y = int(parts[2]) if len(parts) > 2 else _touch_point[1]
+            set_touch_point(x, y, int(parts[0]))
+        elif command == "battery":
+            set_battery_percentage(int(value))
         elif command == "open":
             request_open(value)
-            delay = max(delay, 80)
+            delay = max(delay, 120)
         elif command == "app":
             request_app(value)
-            delay = max(delay, 80)
+            delay = max(delay, 180)
         elif command == "game":
             request_game(value)
-            delay = max(delay, 80)
+            delay = max(delay, 180)
         elif command in ("wait", "sleep", "frames"):
             # Queue-based script version. Timed waits pass through.
             pass
@@ -717,12 +818,55 @@ def request_open(name):
 
 
 def request_app(name):
-    request_open("Applications")
     target = str(name).lower()
     if target.endswith(".py"):
         target = target[:-3]
+    apps = _list_menu_apps(sd_root + "/picoware/apps")
+    index = -1
+    for i, app in enumerate(apps):
+        if app.lower() == target:
+            index = i
+            break
+    if index < 0:
+        raise LaunchTargetError("app not found: " + str(name))
     try:
-        files = os.listdir(apps_source)
+        from picoware.applications import applications
+
+        applications._applications_index = index
+    except Exception:
+        pass
+    request_open("Applications")
+    schedule_key_names(80, "enter")
+    return True
+
+
+def request_game(name):
+    target = str(name).lower()
+    if target.endswith(".py"):
+        target = target[:-3]
+    games = ["Ghouls"]
+    games.extend(_list_menu_apps(sd_root + "/picoware/apps/games"))
+    index = -1
+    for i, game in enumerate(games):
+        if game.lower() == target:
+            index = i
+            break
+    if index < 0:
+        raise LaunchTargetError("game not found: " + str(name))
+    try:
+        from picoware.applications import games as games_app
+
+        games_app._games_index = index
+    except Exception:
+        pass
+    request_open("Games")
+    schedule_key_names(80, "enter")
+    return True
+
+
+def _list_menu_apps(path):
+    try:
+        files = os.listdir(path)
     except OSError:
         files = []
     apps = []
@@ -731,76 +875,36 @@ def request_app(name):
             continue
         if item.endswith(".py"):
             apps.append(item[:-3])
+        if item.endswith(".mpy"):
+            apps.append(item[:-4])
     apps.sort()
-    index = -1
-    for i, app in enumerate(apps):
-        if app.lower() == target:
-            index = i
-            break
-    if index < 0:
-        print("[sim] app not found:", name)
-        return
-    keys = []
-    for _ in range(index):
-        keys.append("down")
-    keys.append("enter")
-    schedule_key_names(80, ",".join(keys))
-
-
-def request_game(name):
-    request_open("Games")
-    target = str(name).lower()
-    if target.endswith(".py"):
-        target = target[:-3]
-    try:
-        files = os.listdir(apps_source + "/games")
-    except OSError:
-        files = []
-    games = ["Ghouls"]
-    py_games = []
-    for item in files:
-        if item.startswith("."):
-            continue
-        if item.endswith(".py"):
-            py_games.append(item[:-3])
-    py_games.sort()
-    games.extend(py_games)
-    index = -1
-    for i, game in enumerate(games):
-        if game.lower() == target:
-            index = i
-            break
-    if index < 0:
-        print("[sim] game not found:", name)
-        return
-    keys = []
-    for _ in range(index + (1 if index > 0 else 0)):
-        keys.append("down")
-    keys.append("enter")
-    schedule_key_names(80, ",".join(keys))
+    return apps
 
 
 def print_capabilities():
-    audio_player = root + "/sim_mp/audio/sdl_audio_player"
-    radio_player = root + "/sim_mp/audio/sdl_radio_player"
-    frame_sidecar = root + "/sim_mp/native/sim_frame_sidecar"
-    viewer_bin = root + "/sim_mp/viewer/sdl_fb_viewer"
+    audio_player = native_helper_path("audio/sdl_audio_player")
+    radio_player = native_helper_path("audio/sdl_radio_player")
+    gameboy_runner = root + "/simulator/gameboy/sim_gameboy_runner"
+    ghouls_sidecar = native_helper_path("native/sim_frame_sidecar")
+    viewer_bin = native_helper_path("viewer/sdl_fb_viewer")
     jpeg_status = "real" if _host_command_exists("djpeg") else "partial"
     rows = (
         ("lcd", "real" if _exists(viewer_bin) else "partial", "RGB565 framebuffer + SDL viewer sidecar"),
         ("keyboard", "real", "SDL/scripted key queue"),
+        ("touch", "simulated", "scripted/viewer touch point and gesture state for touch boards"),
         ("sd_mp", "real", "host directory mapped to simulated SD"),
         ("network", "real" if network_mode == "real" else "fixture", "host sockets/TLS or strict offline fixtures"),
-        ("ubluetooth", "simulated", "virtual BLE scan/GATT/UART"),
+        ("ubluetooth", "simulated", "virtual BLE scan/GATT/UART, no host radio"),
         ("audio", "real" if _exists(audio_player) and _exists(radio_player) else "partial", "SDL/minimp3 local MP3/WAV and HTTP radio sidecars plus silent model"),
         ("jpegdec", jpeg_status, "host djpeg decode with visible placeholder fallback"),
         ("bmp", "real", "direct uncompressed BMP decoder"),
+        ("battery", "simulated", "scriptable battery percentage"),
         ("psram", "simulated", "global byte heap + LCD RGB565 render"),
-        ("engine", "partial", "2D callbacks/collision plus basic 3D sprite/wall projection"),
-        ("gameboy", "partial" if _exists(frame_sidecar) else "unsupported", "native RGB565 frame/input sidecar shell"),
-        ("ghouls", "partial" if _exists(frame_sidecar) else "unsupported", "native RGB565 frame/input sidecar shell with seeded assets"),
+        ("engine", "simulated", "2D lifecycle/collision helpers plus deterministic 3D sprite/wall projection"),
+        ("gameboy", "real" if _exists(gameboy_runner) else "partial", "Walnut-CGB native RGB565 frame/input helper with placeholder fallback"),
+        ("ghouls", "partial" if _exists(ghouls_sidecar) else "simulated", "Python deterministic scene plus optional native sidecar"),
         ("uf2loader", "simulated", "records and validates flash request"),
-        ("machine", "simulated", "Pin/UART/I2S/PWM/USBDevice state/logging shims"),
+        ("machine", "simulated", "Pin/UART/I2S/PWM/USBDevice state/logging shims, no host USB device"),
     )
     for name, status, detail in rows:
         print(name + "\t" + status + "\t" + detail)
@@ -898,10 +1002,26 @@ def poll_viewer_keys():
         text = str(data, "utf-8")
     for line in text.split("\n"):
         if line:
+            parts = line.split()
             try:
-                code = int(line)
-                push_key(code)
-                _record_key(code)
+                if parts[0] == "touch" and len(parts) >= 3:
+                    gesture = int(parts[3]) if len(parts) > 3 else 6
+                    set_touch_point(int(parts[1]), int(parts[2]), gesture)
+                    continue
+                if len(parts) >= 2 and parts[0] in ("down", "up"):
+                    code = int(parts[1])
+                    repeat = len(parts) >= 3 and int(parts[2]) != 0
+                    if parts[0] == "down":
+                        _held_keys[code] = True
+                        if not repeat:
+                            push_key(code)
+                            _record_key(code)
+                    else:
+                        _held_keys.pop(code, None)
+                else:
+                    code = int(line)
+                    push_key(code)
+                    _record_key(code)
             except ValueError:
                 pass
 

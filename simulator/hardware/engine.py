@@ -455,6 +455,24 @@ class Entity(_Native):
             value = args[i] if i < len(args) else defaults[name]
             setattr(self, name, value)
         self.old_position = getattr(self, "position", None)
+        self.direction = kwargs.get("direction", None)
+        self.plane = kwargs.get("plane", None)
+        self.state = kwargs.get("state", 0)
+        self.start_position = kwargs.get("start_position", getattr(self, "position", None))
+        self.end_position = kwargs.get("end_position", getattr(self, "position", None))
+        self.move_timer = kwargs.get("move_timer", 0)
+        self.elapsed_move_timer = kwargs.get("elapsed_move_timer", 0)
+        self.radius = kwargs.get("radius", 0)
+        self.speed = kwargs.get("speed", 0)
+        self.attack_timer = kwargs.get("attack_timer", 0)
+        self.elapsed_attack_timer = kwargs.get("elapsed_attack_timer", 0)
+        self.strength = kwargs.get("strength", 0)
+        self.health = kwargs.get("health", 1)
+        self.max_health = kwargs.get("max_health", self.health)
+        self.level = kwargs.get("level", None)
+        self.xp = kwargs.get("xp", 0)
+        self.health_regen = kwargs.get("health_regen", 0)
+        self.elapsed_health_regen = kwargs.get("elapsed_health_regen", 0)
         self.is_active = True
         self.is_visible = True
         self.is_player = getattr(self, "type", 0) == 0
@@ -467,8 +485,53 @@ class Entity(_Native):
             except TypeError:
                 self.start_callback()
 
+    def __setattr__(self, name, value):
+        if name == "sprite_3d":
+            self.set_sprite3d(value)
+        elif name == "sprite_3d_type":
+            self.set_sprite3d_type(value)
+        elif name == "sprite_3d_color":
+            self.set_sprite3d_color(value)
+        else:
+            super().__setattr__(name, value)
+
     def has_3d_sprite(self):
         return getattr(self, "sprite_3d", None) is not None
+
+    def set_sprite3d(self, value):
+        object.__setattr__(self, "sprite_3d", value)
+        self.__dict__.get("_fields", {})["sprite_3d"] = value
+        if value is not None and getattr(value, "position", None) is None:
+            value.position = getattr(self, "position", None)
+        return None
+
+    def set_sprite3d_type(self, value):
+        object.__setattr__(self, "sprite_3d_type", value)
+        self.__dict__.get("_fields", {})["sprite_3d_type"] = value
+        return None
+
+    def set_sprite3d_color(self, value):
+        object.__setattr__(self, "sprite_3d_color", value)
+        self.__dict__.get("_fields", {})["sprite_3d_color"] = value
+        sprite = getattr(self, "sprite_3d", None)
+        if sprite is not None:
+            sprite.color = value
+        return None
+
+    def create_3d_sprite(self, sprite_3d_type=0, height=1.0, width=1.0, rotation=0.0, color=0x7BEF, image=None):
+        sprite = Sprite3D(getattr(self, "position", None), rotation, 1.0, True)
+        sprite.sprite_type = sprite_3d_type
+        sprite.height = height
+        sprite.width = width
+        sprite.color = color
+        sprite.image = image
+        if sprite_3d_type:
+            sprite.wall_length = float(width or 1.0)
+            sprite.wall_height = float(height or 1.0)
+        self.set_sprite3d(sprite)
+        self.set_sprite3d_type(sprite_3d_type)
+        self.set_sprite3d_color(color)
+        return True
 
     def set_3d_sprite_rotation(self, value):
         object.__setattr__(self, "sprite_rotation", value)
@@ -491,6 +554,42 @@ class Entity(_Native):
         sprite = getattr(self, "sprite_3d", None)
         if sprite is not None:
             sprite.position = getattr(self, "position", None)
+        return None
+
+    def start(self, game=None):
+        if self.start_callback:
+            self._call_callback(self.start_callback, self, game)
+        self.is_active = True
+        return True
+
+    def stop(self, game=None):
+        if self.stop_callback:
+            self._call_callback(self.stop_callback, self, game)
+        self.is_active = False
+        return True
+
+    def update(self, game=None):
+        if self.update_callback:
+            self._call_callback(self.update_callback, self, game)
+        self.update_3d_sprite_position()
+        return True
+
+    def render(self, draw=None, game=None):
+        if self.render_callback:
+            self._call_callback(self.render_callback, self, draw, game)
+        return True
+
+    def collision(self, other, game=None):
+        if self.collision_callback:
+            self._call_callback(self.collision_callback, self, other, game)
+        return True
+
+    def _call_callback(self, callback, *args):
+        for count in range(len(args), -1, -1):
+            try:
+                return callback(*args[:count])
+            except TypeError:
+                continue
         return None
 
 
@@ -558,15 +657,39 @@ class Game(_Native):
                 return True
         return False
 
+    def level_remove(self, level):
+        try:
+            self.levels.remove(level)
+        except ValueError:
+            return False
+        if self.current_level is level:
+            self.current_level = self.levels[0] if self.levels else None
+        return True
+
+    def clamp(self, value, lower, upper):
+        return max(lower, min(upper, value))
+
+    def update(self):
+        self._update()
+        return True
+
+    def render(self):
+        if self.current_level is not None:
+            self.current_level.render(0, self.camera)
+        return True
+
 
 class Level(_Native):
-    def __init__(self, name="", size=None, game=None):
-        super().__init__(name, size, game)
+    def __init__(self, name="", size=None, game=None, start=None, stop=None):
+        super().__init__(name, size, game, start, stop)
         self.name = name
         self.size = size
         self.game = game
+        self.start_callback = start
+        self.stop_callback = stop
         self.entities = []
         self.clear_allowed = True
+        self.is_active = True
 
     @property
     def entity_count(self):
@@ -591,6 +714,78 @@ class Level(_Native):
             return True
         except ValueError:
             return False
+
+    def clear(self):
+        for entity in list(self.entities):
+            try:
+                entity.stop(getattr(self, "game", None))
+            except Exception:
+                pass
+        self.entities = []
+        return True
+
+    def is_collision(self, entity, other):
+        return Engine(None, 0)._intersects(entity, other)
+
+    def has_collided(self, entity):
+        return bool(self.collision_list(entity))
+
+    def collision_list(self, entity):
+        out = []
+        for other in list(self.entities):
+            if other is entity or not getattr(other, "is_active", True):
+                continue
+            if self.is_collision(entity, other):
+                out.append(other)
+        return out
+
+    def start(self):
+        if self.start_callback:
+            self._call_callback(self.start_callback, self)
+        self.is_active = True
+        for entity in list(self.entities):
+            try:
+                entity.start(getattr(self, "game", None))
+            except Exception:
+                pass
+        return True
+
+    def stop(self):
+        if self.stop_callback:
+            self._call_callback(self.stop_callback, self)
+        self.is_active = False
+        for entity in list(self.entities):
+            try:
+                entity.stop(getattr(self, "game", None))
+            except Exception:
+                pass
+        return True
+
+    def update(self):
+        game = getattr(self, "game", None)
+        for entity in list(self.entities):
+            if getattr(entity, "is_active", True):
+                entity.update(game)
+        for entity in list(self.entities):
+            for other in self.collision_list(entity):
+                entity.collision(other, game)
+        return True
+
+    def render(self, perspective=0, camera_params=None):
+        game = getattr(self, "game", None)
+        draw = getattr(game, "draw", None) if game is not None else None
+        if draw is None:
+            return False
+        Engine(game, 0).draw()
+        return True
+
+    def _call_callback(self, callback, *args):
+        for count in range(len(args), -1, -1):
+            try:
+                return callback(*args[:count])
+            except TypeError:
+                continue
+        return None
 
 
 class Camera(_Native):
@@ -634,18 +829,42 @@ class Image(_Native):
 
 
 class Sprite3D(_Native):
-    def __init__(self, position=None, rotation_y=0.0, scale_factor=1.0, active=True):
-        super().__init__(position, rotation_y, scale_factor, active)
-        self.position = position
-        self.rotation_y = rotation_y
-        self.scale_factor = scale_factor
-        self.scale = scale_factor
-        self.active = active
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if len(args) >= 6:
+            self.sprite_type = args[0]
+            self.position = args[1]
+            self.height = args[2]
+            self.width = args[3]
+            self.rotation_y = args[4]
+            self.color = args[5]
+            self.image = args[6] if len(args) > 6 else None
+            self.scale_factor = kwargs.get("scale_factor", 1.0)
+            self.active = True
+        else:
+            self.sprite_type = kwargs.get("sprite_type", 0)
+            self.position = args[0] if len(args) > 0 else kwargs.get("position", None)
+            self.rotation_y = args[1] if len(args) > 1 else kwargs.get("rotation_y", 0.0)
+            self.scale_factor = args[2] if len(args) > 2 else kwargs.get("scale_factor", 1.0)
+            self.active = args[3] if len(args) > 3 else kwargs.get("active", True)
+            self.height = kwargs.get("height", 1.0)
+            self.width = kwargs.get("width", 1.0)
+            self.color = kwargs.get("color", 0x7BEF)
+            self.image = kwargs.get("image", None)
+        self.scale = self.scale_factor
         self.triangles = []
         self.wall_length = 0.0
         self.wall_height = 0.0
         self.wall_depth = 0.0
-        self.color = 0x7BEF
+        self.is_visible = True
+
+    def set_scale(self, value):
+        object.__setattr__(self, "scale_factor", value)
+        object.__setattr__(self, "scale", value)
+        fields = self.__dict__.get("_fields", {})
+        fields["scale_factor"] = value
+        fields["scale"] = value
+        return None
 
     def create_wall(self, x=0, y=0, z=0, length=1.0, height=1.0, depth=0.2, color=0x7BEF):
         self.wall_length = float(length)

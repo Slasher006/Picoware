@@ -377,6 +377,7 @@ class ViewManager:
             self._background_color,
         )
         _alert.draw("Alert")
+        self.log(f"Alert: {message}", 2)
 
         _denied: bool = False
 

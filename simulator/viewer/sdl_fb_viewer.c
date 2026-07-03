@@ -22,6 +22,10 @@ static int map_key(SDL_Keycode key)
         return 0xB7;
     case SDLK_ESCAPE:
         return 0xB1;
+    case SDLK_PAUSE:
+        return 0xD0;
+    case SDLK_INSERT:
+        return 0xD1;
     case SDLK_BACKSPACE:
         return 8;
     case SDLK_RETURN:
@@ -35,6 +39,10 @@ static int map_key(SDL_Keycode key)
         return 0xD4;
     case SDLK_END:
         return 0xD5;
+    case SDLK_PAGEUP:
+        return 0xD6;
+    case SDLK_PAGEDOWN:
+        return 0xD7;
     case SDLK_F1:
         return 0x81;
     case SDLK_F2:
@@ -122,6 +130,24 @@ static void append_key(const char *input_path, int code)
     if (!f)
         return;
     fprintf(f, "%d\n", code);
+    fclose(f);
+}
+
+static void append_key_event(const char *input_path, const char *action, int code, int repeat)
+{
+    FILE *f = fopen(input_path, "a");
+    if (!f)
+        return;
+    fprintf(f, "%s %d %d\n", action, code, repeat);
+    fclose(f);
+}
+
+static void append_touch_event(const char *input_path, int x, int y, int gesture)
+{
+    FILE *f = fopen(input_path, "a");
+    if (!f)
+        return;
+    fprintf(f, "touch %d %d %d\n", x, y, gesture);
     fclose(f);
 }
 
@@ -446,8 +472,24 @@ int main(int argc, char **argv)
                 write_signal(quit_path, "quit");
                 running = 0;
             }
-            else if (event.type == SDL_KEYDOWN)
+            else if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP)
             {
+                int is_keydown = event.type == SDL_KEYDOWN;
+                if (!is_keydown)
+                {
+                    int code = map_key(event.key.keysym.sym);
+                    if ((event.key.keysym.mod & KMOD_CTRL) && event.key.keysym.sym == SDLK_UP)
+                        code = 0xC2;
+                    else if ((event.key.keysym.mod & KMOD_CTRL) && event.key.keysym.sym == SDLK_DOWN)
+                        code = 0xC3;
+                    if (code >= 0)
+                    {
+                        if (event.key.keysym.mod & KMOD_SHIFT)
+                            code = apply_shift(code);
+                        append_key_event(input_path, "up", code, 0);
+                    }
+                    continue;
+                }
                 if ((event.key.keysym.mod & KMOD_CTRL) && event.key.keysym.sym == SDLK_q)
                 {
                     write_signal(quit_path, "quit");
@@ -499,11 +541,32 @@ int main(int argc, char **argv)
                     }
                 }
                 int code = map_key(event.key.keysym.sym);
+                if ((event.key.keysym.mod & KMOD_CTRL) && event.key.keysym.sym == SDLK_UP)
+                    code = 0xC2;
+                else if ((event.key.keysym.mod & KMOD_CTRL) && event.key.keysym.sym == SDLK_DOWN)
+                    code = 0xC3;
                 if (code >= 0)
                 {
                     if (event.key.keysym.mod & KMOD_SHIFT)
                         code = apply_shift(code);
-                    append_key(input_path, code);
+                    append_key_event(input_path, "down", code, event.key.repeat ? 1 : 0);
+                }
+            }
+            else if (event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP)
+            {
+                if (event.button.button == SDL_BUTTON_LEFT)
+                {
+                    int x = event.button.x / scale;
+                    int y = event.button.y / scale;
+                    if (x < 0)
+                        x = 0;
+                    if (y < 0)
+                        y = 0;
+                    if (x >= FB_WIDTH)
+                        x = FB_WIDTH - 1;
+                    if (y >= FB_HEIGHT)
+                        y = FB_HEIGHT - 1;
+                    append_touch_event(input_path, event.type == SDL_MOUSEBUTTONUP ? 0 : x, event.type == SDL_MOUSEBUTTONUP ? 0 : y, event.type == SDL_MOUSEBUTTONUP ? 0 : 6);
                 }
             }
         }

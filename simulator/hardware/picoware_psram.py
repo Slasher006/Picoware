@@ -1,8 +1,10 @@
 SIZE = 8 * 1024 * 1024
+HEAP_START_ADDR = 0
 _memory = bytearray()
 _next = 0
 _freed = 0
 _allocations = {}
+_free_blocks = []
 
 
 def _ensure(size):
@@ -24,6 +26,14 @@ def _estimate_size(value):
 def _alloc(size):
     global _next
     size = max(1, int(size))
+    for index, block in enumerate(_free_blocks):
+        addr, block_size = block
+        if block_size >= size:
+            del _free_blocks[index]
+            if block_size > size:
+                _free_blocks.append((addr + size, block_size - size))
+                _free_blocks.sort()
+            return addr
     addr = _next
     end = addr + size
     if end > SIZE:
@@ -37,6 +47,44 @@ def _free_object(addr):
     size = _allocations.pop(addr, None)
     if size:
         _freed += size
+        _free_blocks.append((addr, size))
+        _free_blocks.sort()
+
+
+def _check_range(addr, length=1):
+    addr = int(addr)
+    length = int(length)
+    if addr < 0 or length < 0 or addr + length > SIZE:
+        raise ValueError("PSRAM address out of range")
+    return addr, length
+
+
+def _coalesce_free_blocks():
+    global _next
+    if not _free_blocks:
+        return 0
+    _free_blocks.sort()
+    merged = []
+    recovered = 0
+    for addr, size in _free_blocks:
+        if not merged:
+            merged.append([addr, size])
+            continue
+        prev = merged[-1]
+        if prev[0] + prev[1] >= addr:
+            end = max(prev[0] + prev[1], addr + size)
+            recovered += min(prev[0] + prev[1], addr + size) - addr
+            prev[1] = end - prev[0]
+        else:
+            merged.append([addr, size])
+    _free_blocks[:] = [(addr, size) for addr, size in merged]
+    if _free_blocks:
+        addr, size = _free_blocks[-1]
+        if addr + size == _next:
+            _next = addr
+            recovered += size
+            _free_blocks.pop()
+    return max(0, recovered)
 
 
 class Object:
@@ -44,6 +92,7 @@ class Object:
         self._value = value
         self._addr = _alloc(_estimate_size(value)) if addr is None else int(addr)
         self._size = int(size) if size else _estimate_size(value)
+        _allocations.setdefault(self._addr, self._size)
         self._freed = False
 
     def value(self):
@@ -114,6 +163,9 @@ class PSRAM:
     def __init__(self):
         pass
 
+    def size(self):
+        return SIZE
+
     def is_ready(self):
         return True
 
@@ -121,13 +173,18 @@ class PSRAM:
         return True
 
     def mem_free(self):
-        return max(0, SIZE - _next + _freed)
+        return max(0, SIZE - _next + sum(size for _, size in _free_blocks))
 
     def get_next_free(self):
         return _next
 
     def write(self, addr, data):
         global _next
+        addr = int(addr)
+        if isinstance(data, str):
+            data = data.encode()
+        data = bytes(data)
+        _check_range(addr, len(data))
         end = min(SIZE, addr + len(data))
         _ensure(end)
         _memory[addr:end] = data[: end - addr]
@@ -135,13 +192,21 @@ class PSRAM:
         return end - addr
 
     def read(self, addr, length):
-        _ensure(min(SIZE, addr + length))
+        addr, length = _check_range(addr, length)
+        _ensure(addr + length)
         return bytes(_memory[addr : addr + length])
 
+    def read_into(self, addr, buffer):
+        data = self.read(addr, len(buffer))
+        buffer[: len(data)] = data
+        return len(data)
+
     def write8(self, addr, value):
+        _check_range(addr, 1)
         self.write(addr, bytes((value & 0xFF,)))
 
     def read8(self, addr):
+        addr, _ = _check_range(addr, 1)
         _ensure(addr + 1)
         return _memory[addr]
 
@@ -160,6 +225,7 @@ class PSRAM:
     def write32_bulk(self, addr, values):
         for i in range(len(values)):
             self.write32(addr + i * 4, values[i])
+        return len(values) * 4
 
     def read32_bulk(self, addr, count):
         out = []
@@ -168,7 +234,15 @@ class PSRAM:
         return out
 
     def fill(self, addr, value, length):
+        _check_range(addr, length)
         self.write(addr, bytes((value & 0xFF,)) * length)
+        return length
+
+    def fill32(self, addr, value, count):
+        count = int(count)
+        _check_range(addr, count * 4)
+        data = int(value & 0xFFFFFFFF).to_bytes(4, "little") * count
+        return self.write(addr, data)
 
     def copy(self, src_addr, dest_addr, length):
         self.write(dest_addr, self.read(src_addr, length))
@@ -181,7 +255,7 @@ class PSRAM:
         return obj
 
     def collect(self):
-        return _freed
+        return _coalesce_free_blocks()
 
     def malloc(self, value):
         return self.alloc_object(value)
@@ -194,7 +268,8 @@ class PSRAM:
 
 
 def read(addr, length):
-    _ensure(min(SIZE, int(addr) + int(length)))
+    addr, length = _check_range(addr, length)
+    _ensure(addr + length)
     return bytes(_memory[int(addr) : int(addr) + int(length)])
 
 
