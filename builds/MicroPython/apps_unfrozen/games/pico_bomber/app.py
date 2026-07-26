@@ -98,24 +98,19 @@ def _handle_name_input(input_manager, button):
 
 
 def start(view_manager):
-    """Create a fresh Pico Bomber title screen at the portable low clock."""
+    """Create a fresh Pico Bomber title screen."""
     global _game, _renderer, _leaderboard, _next_frame, _score_saved
     global _mode_start_pending
 
-    view_manager.freq(True)
     _mode_start_pending = False
-    try:
-        _game = GameModel()
-        _renderer = Renderer(view_manager.draw)
-        _leaderboard = Leaderboard(view_manager.storage)
-        _game.leaderboard = _leaderboard.entries
-        _score_saved = False
-        _renderer.draw_frame(_game)
-        _next_frame = ticks_add(ticks_ms(), FRAME_MS)
-        return True
-    except Exception:
-        view_manager.freq()
-        raise
+    _game = GameModel()
+    _renderer = Renderer(view_manager.draw)
+    _leaderboard = Leaderboard(view_manager.storage)
+    _game.leaderboard = _leaderboard.entries
+    _score_saved = False
+    _next_frame = ticks_ms()
+    _renderer.draw_frame(_game)
+    return True
 
 
 def run(view_manager):
@@ -233,4 +228,3 @@ def stop(view_manager):
     _score_saved = False
     _mode_start_pending = False
     collect()
-    view_manager.freq()
