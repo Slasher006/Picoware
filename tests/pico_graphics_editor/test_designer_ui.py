@@ -148,6 +148,103 @@ class DesignerUiTests(unittest.TestCase):
         self.assertEqual(connection.trigger, "open")
         widget.close()
 
+    def test_element_ports_create_asset_to_asset_relation(self) -> None:
+        """Drag a button output to a focused asset on another screen."""
+        project = GuiProject.create("Asset Flow")
+        button = GuiElement.create("button", 1)
+        button.name = "play_button"
+        button.event_name = "play"
+        project.screens[0].elements.append(button)
+        target = ScreenDesign.create("Game", 320, 320, 1)
+        icon = GuiElement.create("icon", 1)
+        icon.name = "game_icon"
+        target.elements.append(icon)
+        project.screens.append(target)
+        session = DesignerSession()
+        session.set_project(project)
+        widget = ScreenFlowWidget(session)
+        widget.show()
+        self.application.processEvents()
+        source_port = widget.graph._element_output_port(
+            project.screens[0],
+            button,
+        ).toPoint()
+        target_port = widget.graph._element_input_port(target, icon).toPoint()
+        QTest.mousePress(
+            widget.graph,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            source_port,
+        )
+        QTest.mouseMove(widget.graph, target_port)
+        QTest.mouseRelease(
+            widget.graph,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            target_port,
+        )
+        self.assertEqual(len(project.connections), 1)
+        connection = project.connections[0]
+        self.assertEqual(connection.source_element_id, button.id)
+        self.assertEqual(connection.target_element_id, icon.id)
+        self.assertEqual(connection.trigger, "play")
+        widget.preview.setFocus()
+        QTest.keyClick(widget.preview, Qt.Key.Key_Return)
+        self.assertEqual(widget.simulated_screen_id, target.id)
+        self.assertEqual(widget.preview.focused_element_id, icon.id)
+        widget.close()
+
+    def test_element_behavior_updates_connected_relations(self) -> None:
+        """Configure an element event and keep its graph relations synchronized."""
+        project = GuiProject.create("Configurable")
+        button = GuiElement.create("button", 1)
+        project.screens[0].elements.append(button)
+        target = ScreenDesign.create("Settings", 320, 320, 1)
+        project.screens.append(target)
+        connection = FlowConnection.create(
+            project.screens[0].id,
+            target.id,
+            button.activation_event(),
+            button.id,
+        )
+        project.connections.append(connection)
+        session = DesignerSession()
+        session.set_project(project)
+        widget = ScreenDesignerWidget(session)
+        widget._select_element(button.id)
+        widget.event_name_edit.setText("open_settings")
+        widget.enabled_check.setChecked(False)
+        widget._element_properties_changed()
+        self.assertEqual(button.activation_event(), "open_settings")
+        self.assertFalse(button.enabled)
+        self.assertEqual(connection.trigger, "open_settings")
+        self.assertIn("1 connected relation", widget.element_flow_label.text())
+        widget.close()
+
+    def test_deleting_element_removes_its_asset_relations(self) -> None:
+        """Remove graph relations that reference a deleted design element."""
+        project = GuiProject.create("Delete Asset")
+        button = GuiElement.create("button", 1)
+        project.screens[0].elements.append(button)
+        target = ScreenDesign.create("Target", 320, 320, 1)
+        project.screens.append(target)
+        project.connections.append(
+            FlowConnection.create(
+                project.screens[0].id,
+                target.id,
+                button.activation_event(),
+                button.id,
+            )
+        )
+        session = DesignerSession()
+        session.set_project(project)
+        widget = ScreenDesignerWidget(session)
+        widget._select_element(button.id)
+        widget._delete_element()
+        self.assertEqual(project.screens[0].elements, [])
+        self.assertEqual(project.connections, [])
+        widget.close()
+
     def test_screen_list_thumbnail_renders_screen_content(self) -> None:
         """Render actual screen colors inside the screen list thumbnail."""
         session = DesignerSession()

@@ -214,10 +214,32 @@ class LiveSimulatorTests(unittest.TestCase):
         active.elements.append(button)
         destination = ScreenDesign.create("Destination", 320, 320, 2)
         destination.background_color = 0x07E0
+        first_destination = GuiElement.create("button", 1)
+        first_destination.name = "unused"
+        finish_button = GuiElement.create("button", 2)
+        finish_button.name = "finish"
+        destination.elements.extend((first_destination, finish_button))
+        finished = ScreenDesign.create("Finished", 320, 320, 3)
+        finished.background_color = 0x001F
         project.screens.append(active)
         project.screens.append(destination)
+        project.screens.append(finished)
         project.connections.append(
-            FlowConnection.create(active.id, destination.id, "next")
+            FlowConnection.create(
+                active.id,
+                destination.id,
+                "next",
+                button.id,
+                finish_button.id,
+            )
+        )
+        project.connections.append(
+            FlowConnection.create(
+                destination.id,
+                finished.id,
+                "finish",
+                finish_button.id,
+            )
         )
         source = generate_live_app_python(project, active.id)
         controller = LiveSimulatorController()
@@ -252,6 +274,15 @@ class LiveSimulatorTests(unittest.TestCase):
                 QTest.qWait(50)
             self.assertGreater(image.pixelColor(160, 160).green(), 240)
             self.assertLess(image.pixelColor(160, 160).red(), 20)
+            controller.send_key(13, True)
+            controller.send_key(13, False)
+            for unused in range(80):
+                image = controller.current_frame()
+                if image.pixelColor(160, 160).blue() > 240:
+                    break
+                QTest.qWait(50)
+            self.assertGreater(image.pixelColor(160, 160).blue(), 240)
+            self.assertLess(image.pixelColor(160, 160).green(), 20)
         finally:
             controller.shutdown()
 

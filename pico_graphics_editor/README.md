@@ -83,7 +83,7 @@ Drag buttons, labels, panels, rectangles, icons, lists, and progress indicators 
 
 Shift-click or drag a selection rectangle to edit several elements together. Arrow keys move the selection by one pixel, Shift+Arrow moves it by ten, Ctrl+D duplicates it, and Delete removes design-only elements. The hierarchy acts as a layers panel: drag rows to reorder drawing depth, or use the lock and visibility controls. Screen rows include live thumbnails of their actual contents and can also be reordered by dragging.
 
-Focusable elements have an explicit focus order. Enable **Focus order** above the canvas to see numbered badges. The navigation preview supports Tab or arrow-key focus, Enter or Space activation, and direct mouse activation. An activated element sends its element name as the relation event. Generated GUI classes expose `focused_element`, `move_focus`, and `activate_focused` helpers for Pico keyboard integration.
+Focusable elements have an explicit focus order. Enable **Focus order** above the canvas to see numbered badges. Each element can also be input-enabled or disabled and can define an **Activation event** independently from its display name. The navigation preview supports Tab or arrow-key focus, Enter or Space activation, and direct mouse activation. Generated GUI classes expose `focused_element`, `move_focus`, and `activate_focused` helpers for Pico keyboard integration.
 
 Each screen has its own background color and can use a temporary full-screen reference image. Screens can be added, duplicated, deleted, and opened directly from the flow graph. GUI edits use complete-project undo and redo. Dirty projects are atomically autosaved for manual recovery from **GUI Project > Recover Autosaved GUI Project...**; a successful explicit save clears that recovery file.
 
@@ -101,9 +101,9 @@ Use **GUI Project > Apply Edits to Existing App...** to review a combined multi-
 
 ## Screen Flow workspace
 
-Every application screen is represented as a draggable node containing a live rendering of that screen. Directed relations define:
+Every application screen is represented as a draggable node containing a live rendering of that screen. Focusable buttons, icons, lists, and other configured elements appear as rows below their screen with individual green input and blue output ports. Directed relations define:
 
-- Source and target screens
+- Source and target screens or elements
 - Event trigger
 - Optional named condition
 - Optional named action
@@ -111,7 +111,7 @@ Every application screen is represented as a draggable node containing a live re
 
 One screen is marked as the start screen. Double-click a graph node to open it in the GUI designer. The navigation simulator accepts event names, follows matching relations, reports conditions and actions, and renders the resulting screen without running Pico hardware code.
 
-Each graph node has a green input port and blue output port. Drag from the blue port of one node to the green port or body of another node to create a relation with the values currently shown in the relation form. Click a relation line to select and edit it, or press Delete to remove a design-only relation. **Auto-layout graph** arranges screens by navigation depth. Nodes remain independently draggable, and mouse-wheel graph zoom continues to work.
+Drag from any blue screen or element port to a green screen or element port. An element source automatically uses its configured activation event. Connecting to a destination element opens that element's screen and gives it initial keyboard focus. The relation form also lists all available screen and element endpoints for precise selection. Screen-only relations from older projects continue to work unchanged. Click a relation line to select and edit it, or press Delete to remove a design-only relation. **Auto-layout graph** arranges screens by navigation depth. Nodes remain independently draggable, and mouse-wheel graph zoom continues to work.
 
 ### Live simulator preview
 

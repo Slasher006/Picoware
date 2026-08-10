@@ -33,11 +33,21 @@ class DesignerModelTests(unittest.TestCase):
         element = GuiElement.create("button", 1)
         element.editor_locked = True
         element.focus_order = 7
+        element.event_name = "launch_game"
+        element.enabled = False
         project.screens[0].elements.append(element)
         second = ScreenDesign.create("Game", 320, 320, 1)
+        target_element = GuiElement.create("icon", 1)
+        second.elements.append(target_element)
         project.screens.append(second)
         project.connections.append(
-            FlowConnection.create(project.screens[0].id, second.id, "start")
+            FlowConnection.create(
+                project.screens[0].id,
+                second.id,
+                "launch_game",
+                element.id,
+                target_element.id,
+            )
         )
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "demo.picogui.json"
@@ -48,7 +58,18 @@ class DesignerModelTests(unittest.TestCase):
         self.assertTrue(loaded.screens[0].elements[0].editor_locked)
         self.assertTrue(loaded.screens[0].elements[0].focusable)
         self.assertEqual(loaded.screens[0].elements[0].focus_order, 7)
-        self.assertEqual(loaded.connections[0].trigger, "start")
+        self.assertFalse(loaded.screens[0].elements[0].enabled)
+        self.assertEqual(
+            loaded.screens[0].elements[0].activation_event(),
+            "launch_game",
+        )
+        self.assertEqual(loaded.connections[0].trigger, "launch_game")
+        self.assertEqual(loaded.connections[0].source_element_id, element.id)
+        self.assertEqual(
+            loaded.connections[0].target_element_id,
+            target_element.id,
+        )
+        self.assertEqual(loaded.format_version, 3)
 
     def test_generated_python_is_parseable(self) -> None:
         """Generate valid screen drawing and flow methods."""
@@ -77,6 +98,34 @@ class DesignerModelTests(unittest.TestCase):
         self.assertIn("def start(view_manager):", source)
         self.assertIn("def run(view_manager):", source)
         self.assertEqual(project.start_screen_id, project.screens[0].id)
+
+    def test_generated_element_relation_focuses_target_asset(self) -> None:
+        """Generate activation events and destination focus from asset endpoints."""
+        project = GuiProject.create("Asset Flow")
+        source = GuiElement.create("button", 1)
+        source.event_name = "open_details"
+        project.screens[0].elements.append(source)
+        target = ScreenDesign.create("Details", 320, 320, 1)
+        first = GuiElement.create("button", 1)
+        second = GuiElement.create("icon", 2)
+        first.focus_order = 0
+        second.focus_order = 1
+        target.elements.extend((first, second))
+        project.screens.append(target)
+        project.connections.append(
+            FlowConnection.create(
+                project.screens[0].id,
+                target.id,
+                source.activation_event(),
+                source.id,
+                second.id,
+            )
+        )
+        generated = generate_python(project)
+        ast.parse(generated)
+        self.assertIn("event == 'open_details'", generated)
+        self.assertIn("self.focus_index = 1", generated)
+        self.assertIn("('open_details',)", generated)
 
     def test_patch_replaces_managed_block(self) -> None:
         """Update one designer block without duplicating it."""

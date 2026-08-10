@@ -81,6 +81,22 @@ from .reference import prepare_reference_image, read_image_frames
 
 
 ELEMENT_MIME_TYPE = "application/x-pico-gui-element"
+FLOW_ELEMENT_SEPARATOR = "::element::"
+
+
+def flow_endpoint_key(screen_id: str, element_id: str = "") -> str:
+    """Encode one screen or element endpoint for Qt combo item data."""
+    if element_id:
+        return f"{screen_id}{FLOW_ELEMENT_SEPARATOR}{element_id}"
+    return screen_id
+
+
+def parse_flow_endpoint(value: object) -> tuple[str, str]:
+    """Decode a Qt combo endpoint into screen and optional element IDs."""
+    text = str(value or "")
+    if FLOW_ELEMENT_SEPARATOR not in text:
+        return text, ""
+    return tuple(text.split(FLOW_ELEMENT_SEPARATOR, 1))
 
 
 class DesignerSession(QObject):
@@ -287,7 +303,10 @@ def draw_screen(
     )
     for element in screen.elements:
         if element.visible:
+            if not element.enabled:
+                painter.setOpacity(0.45)
             draw_element(painter, element, element.id in selected_ids)
+            painter.setOpacity(1.0)
     painter.restore()
 
 
@@ -1064,9 +1083,17 @@ class ScreenDesignerWidget(QWidget):
         self.asset_call_edit = QLineEdit()
         self.asset_call_edit.setPlaceholderText("Optional icon function")
         self.visible_check = QCheckBox("Visible")
+        self.enabled_check = QCheckBox("Input enabled")
         self.focusable_check = QCheckBox("Keyboard focusable")
         self.focus_order_spin = QSpinBox()
         self.focus_order_spin.setRange(0, 999)
+        self.event_name_edit = QLineEdit()
+        self.event_name_edit.setPlaceholderText("Uses the element name")
+        self.event_name_edit.setToolTip(
+            "Event emitted when this element is clicked or activated."
+        )
+        self.element_flow_label = QLabel()
+        self.element_flow_label.setWordWrap(True)
         self.fill_color_button = QPushButton("Fill...")
         self.border_color_button = QPushButton("Border...")
         self.text_color_button = QPushButton("Text...")
@@ -1079,8 +1106,11 @@ class ScreenDesignerWidget(QWidget):
         property_form.addRow("Text", self.element_text_edit)
         property_form.addRow("Asset call", self.asset_call_edit)
         property_form.addRow(self.visible_check)
+        property_form.addRow(self.enabled_check)
         property_form.addRow(self.focusable_check)
         property_form.addRow("Focus order", self.focus_order_spin)
+        property_form.addRow("Activation event", self.event_name_edit)
+        property_form.addRow("Graph connections", self.element_flow_label)
         property_form.addRow(self.fill_color_button)
         property_form.addRow(self.border_color_button)
         property_form.addRow(self.text_color_button)
@@ -1139,12 +1169,14 @@ class ScreenDesignerWidget(QWidget):
             self.element_name_edit,
             self.element_text_edit,
             self.asset_call_edit,
+            self.event_name_edit,
         ):
             widget.editingFinished.connect(self._element_properties_changed)
         self.kind_combo.currentIndexChanged.connect(self._element_properties_changed)
         for widget in (self.x_spin, self.y_spin, self.width_spin, self.height_spin):
             widget.valueChanged.connect(self._element_properties_changed)
         self.visible_check.toggled.connect(self._element_properties_changed)
+        self.enabled_check.toggled.connect(self._element_properties_changed)
         self.focusable_check.toggled.connect(self._element_properties_changed)
         self.focus_order_spin.valueChanged.connect(self._element_properties_changed)
         self.fill_color_button.clicked.connect(
@@ -1388,6 +1420,13 @@ class ScreenDesignerWidget(QWidget):
         screen.elements = [
             item for item in screen.elements if item.id not in self.selected_element_ids
         ]
+        project = self.session.project
+        project.connections = [
+            connection
+            for connection in project.connections
+            if connection.source_element_id not in self.selected_element_ids
+            and connection.target_element_id not in self.selected_element_ids
+        ]
         self.selected_element_id = None
         self.selected_element_ids.clear()
         self.session.mark_changed()
@@ -1516,10 +1555,17 @@ class ScreenDesignerWidget(QWidget):
                 prefix = "[lock] "
             elif not element.visible:
                 prefix = "[hidden] "
+            elif not element.enabled:
+                prefix = "[disabled] "
             else:
                 prefix = ""
             focus = f" | focus {element.focus_order}" if element.focusable else ""
-            item = QListWidgetItem(f"{prefix}{element.kind}: {element.name}{focus}")
+            event = (
+                f" | event {element.activation_event()}" if element.focusable else ""
+            )
+            item = QListWidgetItem(
+                f"{prefix}{element.kind}: {element.name}{focus}{event}"
+            )
             item.setData(Qt.ItemDataRole.UserRole, element.id)
             if element.source_path:
                 state = (
@@ -1677,6 +1723,7 @@ class ScreenDesignerWidget(QWidget):
             )
         if element is None:
             self.source_notice_label.clear()
+            self.element_flow_label.clear()
             return
         if len(selected) > 1:
             locked_count = sum(item.locked or item.editor_locked for item in selected)
@@ -1707,9 +1754,20 @@ class ScreenDesignerWidget(QWidget):
         self.asset_call_edit.setText(element.asset_call)
         self.asset_call_edit.setEnabled(not bool(element.source_path))
         self.visible_check.setChecked(element.visible)
+        self.enabled_check.setChecked(element.enabled)
         self.focusable_check.setChecked(element.focusable)
         self.focus_order_spin.setValue(element.focus_order)
         self.focus_order_spin.setEnabled(element.focusable)
+        self.event_name_edit.setText(element.event_name)
+        connection_count = sum(
+            connection.source_element_id == element.id
+            or connection.target_element_id == element.id
+            for connection in self.session.project.connections
+        )
+        self.element_flow_label.setText(
+            f"{connection_count} connected relation"
+            f"{'s' if connection_count != 1 else ''}."
+        )
         self._update_color_buttons(element)
         source_call = str(element.source_values.get("call_type", ""))
         source_backed = bool(element.source_path)
@@ -1792,6 +1850,7 @@ class ScreenDesignerWidget(QWidget):
         element = self._selected_element()
         if element is None or element.locked or element.editor_locked:
             return
+        old_event = element.activation_event()
         element.name = self.element_name_edit.text().strip() or element.name
         element.kind = str(self.kind_combo.currentData())
         element.x = self.x_spin.value()
@@ -1801,8 +1860,15 @@ class ScreenDesignerWidget(QWidget):
         element.text = self.element_text_edit.text().replace("\\n", "\n")
         element.asset_call = self.asset_call_edit.text().strip()
         element.visible = self.visible_check.isChecked()
+        element.enabled = self.enabled_check.isChecked()
         element.focusable = self.focusable_check.isChecked()
         element.focus_order = self.focus_order_spin.value()
+        element.event_name = self.event_name_edit.text().strip()
+        new_event = element.activation_event()
+        if new_event != old_event:
+            for connection in self.session.project.connections:
+                if connection.source_element_id == element.id:
+                    connection.trigger = new_event
         self.session.mark_changed()
 
     def _choose_screen_background(self) -> None:
@@ -1872,11 +1938,16 @@ class GuiPreview(QWidget):
         self.setMinimumSize(260, 220)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-    def set_screen(self, screen_id: str) -> None:
+    def set_screen(self, screen_id: str, focused_element_id: str = "") -> None:
         """Set the screen shown in the simulator preview."""
         self.preview_screen_id = screen_id
-        self.focused_element_id = None
-        self._move_focus(0)
+        self.focused_element_id = focused_element_id or None
+        if self._focused_element() is None:
+            self.focused_element_id = None
+            self._move_focus(0)
+        else:
+            element = self._focused_element()
+            self.focus_changed.emit(element.name if element is not None else "")
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -1906,6 +1977,7 @@ class GuiPreview(QWidget):
                 item
                 for item in reversed(screen.elements)
                 if item.visible
+                and item.enabled
                 and item.focusable
                 and QRectF(item.x, item.y, item.width, item.height).contains(point)
             ),
@@ -1915,7 +1987,7 @@ class GuiPreview(QWidget):
             return
         self.focused_element_id = element.id
         self.focus_changed.emit(element.name)
-        self.event_requested.emit(element.name)
+        self.event_requested.emit(element.activation_event())
         self.update()
         self.setFocus()
         event.accept()
@@ -1937,7 +2009,7 @@ class GuiPreview(QWidget):
         if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space}:
             element = self._focused_element()
             if element is not None:
-                self.event_requested.emit(element.name)
+                self.event_requested.emit(element.activation_event())
                 event.accept()
                 return
         super().keyPressEvent(event)
@@ -1950,7 +2022,7 @@ class GuiPreview(QWidget):
         indexed = [
             (index, element)
             for index, element in enumerate(screen.elements)
-            if element.visible and element.focusable
+            if element.visible and element.enabled and element.focusable
         ]
         return [
             element
@@ -2023,12 +2095,13 @@ class FlowCanvas(QWidget):
 
     screen_selected = Signal(str)
     screen_activated = Signal(str)
-    connection_requested = Signal(str, str)
+    connection_requested = Signal(str, str, str, str)
     connection_selected = Signal(str)
     connection_delete_requested = Signal(str)
 
     NODE_WIDTH = 200
     NODE_HEIGHT = 140
+    ELEMENT_ROW_HEIGHT = 22
     PORT_RADIUS = 7
 
     def __init__(self, session: DesignerSession, parent: QWidget | None = None):
@@ -2041,8 +2114,10 @@ class FlowCanvas(QWidget):
         self._drag_offset = QPointF()
         self._node_dragging = False
         self._connection_source_id: str | None = None
+        self._connection_source_element_id: str | None = None
         self._connection_point = QPointF()
         self._connection_target_id: str | None = None
+        self._connection_target_element_id: str | None = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(1400, 900)
@@ -2061,7 +2136,11 @@ class FlowCanvas(QWidget):
                 self._draw_connection(painter, source, target, connection)
         source = project.screen(self._connection_source_id or "")
         if source is not None:
-            self._draw_connection_preview(painter, source)
+            self._draw_connection_preview(
+                painter,
+                source,
+                self._connection_source_element_id or "",
+            )
         for screen in project.screens:
             self._draw_node(painter, screen)
         painter.end()
@@ -2071,13 +2150,16 @@ class FlowCanvas(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         point = self._graph_point(event.position())
-        output_screen = self._output_screen_at(point)
-        if output_screen is not None:
+        output = self._output_endpoint_at(point)
+        if output is not None:
+            output_screen, output_element_id = output
             self.selected_screen_id = output_screen.id
             self.selected_connection_id = None
             self._connection_source_id = output_screen.id
+            self._connection_source_element_id = output_element_id
             self._connection_point = point
             self._connection_target_id = None
+            self._connection_target_element_id = None
             self._node_dragging = False
             self.screen_selected.emit(output_screen.id)
             self.update()
@@ -2114,9 +2196,14 @@ class FlowCanvas(QWidget):
         point = self._graph_point(event.position())
         if self._connection_source_id is not None:
             target = self._connection_target_at(point)
-            self._connection_target_id = target.id if target is not None else None
+            self._connection_target_id = target[0].id if target is not None else None
+            self._connection_target_element_id = (
+                target[1] if target is not None else None
+            )
             self._connection_point = (
-                self._input_port(target) if target is not None else point
+                self._endpoint_input_port(target[0], target[1])
+                if target is not None
+                else point
             )
             self.update()
             return
@@ -2135,17 +2222,26 @@ class FlowCanvas(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         source_id = self._connection_source_id
+        source_element_id = self._connection_source_element_id or ""
         target_id = self._connection_target_id
+        target_element_id = self._connection_target_element_id or ""
         node_dragging = self._node_dragging
         self._connection_source_id = None
+        self._connection_source_element_id = None
         self._connection_target_id = None
+        self._connection_target_element_id = None
         self._connection_point = QPointF()
         self._node_dragging = False
         self.update()
         if node_dragging:
             self.session.end_transaction()
         if source_id and target_id:
-            self.connection_requested.emit(source_id, target_id)
+            self.connection_requested.emit(
+                source_id,
+                source_element_id,
+                target_id,
+                target_element_id,
+            )
         event.accept()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
@@ -2179,7 +2275,10 @@ class FlowCanvas(QWidget):
     def _draw_node(self, painter: QPainter, screen: ScreenDesign) -> None:
         """Draw one screen node."""
         rectangle = QRectF(
-            screen.node_x, screen.node_y, self.NODE_WIDTH, self.NODE_HEIGHT
+            screen.node_x,
+            screen.node_y,
+            self.NODE_WIDTH,
+            self._node_height(screen),
         )
         selected = screen.id == self.selected_screen_id
         start = screen.id == self.session.project.start_screen_id
@@ -2228,6 +2327,7 @@ class FlowCanvas(QWidget):
         input_color = (
             QColor("#ebcb8b")
             if screen.id == self._connection_target_id
+            and not self._connection_target_element_id
             else QColor("#a3be8c")
         )
         painter.setPen(QPen(QColor("#20242a"), 1))
@@ -2235,10 +2335,59 @@ class FlowCanvas(QWidget):
         painter.drawEllipse(
             self._input_port(screen), self.PORT_RADIUS, self.PORT_RADIUS
         )
-        painter.setBrush(QColor("#5e81ac"))
+        output_color = (
+            QColor("#00bfff")
+            if screen.id == self._connection_source_id
+            and not self._connection_source_element_id
+            else QColor("#5e81ac")
+        )
+        painter.setBrush(output_color)
         painter.drawEllipse(
             self._output_port(screen), self.PORT_RADIUS, self.PORT_RADIUS
         )
+        for index, element in enumerate(self._navigation_elements(screen)):
+            active = element.visible and element.enabled and element.focusable
+            row = QRectF(
+                screen.node_x + 8,
+                screen.node_y + self.NODE_HEIGHT + index * self.ELEMENT_ROW_HEIGHT + 2,
+                self.NODE_WIDTH - 16,
+                self.ELEMENT_ROW_HEIGHT - 4,
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#343a43" if active else "#292d33"))
+            painter.drawRoundedRect(row, 3, 3)
+            painter.setPen(QColor("#eceff4" if active else "#7f8b99"))
+            label = f"{element.kind}: {element.name}  [{element.activation_event()}]"
+            painter.drawText(
+                row.adjusted(5, 0, -5, 0),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                label,
+            )
+            input_color = (
+                QColor("#ebcb8b")
+                if screen.id == self._connection_target_id
+                and element.id == self._connection_target_element_id
+                else QColor("#a3be8c")
+            )
+            painter.setPen(QPen(QColor("#20242a"), 1))
+            painter.setBrush(input_color)
+            painter.drawEllipse(
+                self._element_input_port(screen, element),
+                self.PORT_RADIUS - 1,
+                self.PORT_RADIUS - 1,
+            )
+            output_color = (
+                QColor("#00bfff")
+                if screen.id == self._connection_source_id
+                and element.id == self._connection_source_element_id
+                else QColor("#5e81ac")
+            )
+            painter.setBrush(output_color)
+            painter.drawEllipse(
+                self._element_output_port(screen, element),
+                self.PORT_RADIUS - 1,
+                self.PORT_RADIUS - 1,
+            )
 
     def _draw_connection(
         self,
@@ -2248,8 +2397,8 @@ class FlowCanvas(QWidget):
         connection: FlowConnection,
     ) -> None:
         """Draw one labeled directional graph edge."""
-        start = self._output_port(source)
-        end = self._input_port(target)
+        start = self._endpoint_output_port(source, connection.source_element_id)
+        end = self._endpoint_input_port(target, connection.target_element_id)
         path, approach = self._connection_path(start, end)
         selected = connection.id == self.selected_connection_id
         edge_color = (
@@ -2279,11 +2428,19 @@ class FlowCanvas(QWidget):
         painter.setPen(QColor("#eceff4"))
         painter.drawText(midpoint + QPointF(4, -5), connection.trigger)
 
-    def _draw_connection_preview(self, painter: QPainter, source: ScreenDesign) -> None:
+    def _draw_connection_preview(
+        self,
+        painter: QPainter,
+        source: ScreenDesign,
+        source_element_id: str,
+    ) -> None:
         """Draw the temporary edge while the mouse chooses a target."""
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(QColor("#00bfff"), 2, Qt.PenStyle.DashLine))
-        painter.drawLine(self._output_port(source), self._connection_point)
+        painter.drawLine(
+            self._endpoint_output_port(source, source_element_id),
+            self._connection_point,
+        )
 
     def _connection_path(
         self, start: QPointF, end: QPointF
@@ -2312,7 +2469,8 @@ class FlowCanvas(QWidget):
             if source is None or target is None:
                 continue
             path, _ = self._connection_path(
-                self._output_port(source), self._input_port(target)
+                self._endpoint_output_port(source, connection.source_element_id),
+                self._endpoint_input_port(target, connection.target_element_id),
             )
             for index in range(41):
                 sample = path.pointAtPercent(index / 40)
@@ -2330,30 +2488,41 @@ class FlowCanvas(QWidget):
                 screen.node_x,
                 screen.node_y,
                 self.NODE_WIDTH,
-                self.NODE_HEIGHT,
+                self._node_height(screen),
             ).contains(point):
                 return screen
         return None
 
-    def _output_screen_at(self, point: QPointF) -> ScreenDesign | None:
-        """Return the screen whose output port contains the point."""
+    def _output_endpoint_at(
+        self,
+        point: QPointF,
+    ) -> tuple[ScreenDesign, str] | None:
+        """Return the screen or element output port below one point."""
         for screen in reversed(self.session.project.screens):
+            for element in reversed(self._navigation_elements(screen)):
+                port = self._element_output_port(screen, element)
+                if self._port_contains(port, point, 5):
+                    return screen, element.id
             port = self._output_port(screen)
-            if (point.x() - port.x()) ** 2 + (point.y() - port.y()) ** 2 <= (
-                self.PORT_RADIUS + 5
-            ) ** 2:
-                return screen
+            if self._port_contains(port, point, 5):
+                return screen, ""
         return None
 
-    def _connection_target_at(self, point: QPointF) -> ScreenDesign | None:
-        """Return a connection target below an input port or node body."""
+    def _connection_target_at(
+        self,
+        point: QPointF,
+    ) -> tuple[ScreenDesign, str] | None:
+        """Return a screen or element connection target below one point."""
         for screen in reversed(self.session.project.screens):
+            for element in reversed(self._navigation_elements(screen)):
+                port = self._element_input_port(screen, element)
+                if self._port_contains(port, point, 7):
+                    return screen, element.id
             port = self._input_port(screen)
-            if (point.x() - port.x()) ** 2 + (point.y() - port.y()) ** 2 <= (
-                self.PORT_RADIUS + 7
-            ) ** 2:
-                return screen
-        return self._screen_at(point)
+            if self._port_contains(port, point, 7):
+                return screen, ""
+        screen = self._screen_at(point)
+        return (screen, "") if screen is not None else None
 
     def _input_port(self, screen: ScreenDesign) -> QPointF:
         """Return the center of a screen node input port."""
@@ -2365,6 +2534,82 @@ class FlowCanvas(QWidget):
             screen.node_x + self.NODE_WIDTH,
             screen.node_y + self.NODE_HEIGHT / 2,
         )
+
+    def _element_input_port(
+        self,
+        screen: ScreenDesign,
+        element: GuiElement,
+    ) -> QPointF:
+        """Return the input port for one configurable GUI element."""
+        index = self._navigation_elements(screen).index(element)
+        return QPointF(
+            screen.node_x,
+            screen.node_y
+            + self.NODE_HEIGHT
+            + index * self.ELEMENT_ROW_HEIGHT
+            + self.ELEMENT_ROW_HEIGHT / 2,
+        )
+
+    def _element_output_port(
+        self,
+        screen: ScreenDesign,
+        element: GuiElement,
+    ) -> QPointF:
+        """Return the output port for one configurable GUI element."""
+        point = self._element_input_port(screen, element)
+        return QPointF(screen.node_x + self.NODE_WIDTH, point.y())
+
+    def _endpoint_input_port(
+        self,
+        screen: ScreenDesign,
+        element_id: str,
+    ) -> QPointF:
+        """Return the input port for a screen or one of its elements."""
+        element = self.session.project.element(screen.id, element_id)
+        if element is not None and element in self._navigation_elements(screen):
+            return self._element_input_port(screen, element)
+        return self._input_port(screen)
+
+    def _endpoint_output_port(
+        self,
+        screen: ScreenDesign,
+        element_id: str,
+    ) -> QPointF:
+        """Return the output port for a screen or one of its elements."""
+        element = self.session.project.element(screen.id, element_id)
+        if element is not None and element in self._navigation_elements(screen):
+            return self._element_output_port(screen, element)
+        return self._output_port(screen)
+
+    def _navigation_elements(self, screen: ScreenDesign) -> list[GuiElement]:
+        """Return elements exposed as configurable graph endpoints."""
+        connected_ids = {
+            element_id
+            for connection in self.session.project.connections
+            for element_id in (
+                connection.source_element_id,
+                connection.target_element_id,
+            )
+            if element_id
+        }
+        return [
+            element
+            for element in screen.elements
+            if element.focusable or element.id in connected_ids
+        ]
+
+    def _node_height(self, screen: ScreenDesign) -> float:
+        """Return node height including its configurable element rows."""
+        return (
+            self.NODE_HEIGHT
+            + len(self._navigation_elements(screen)) * self.ELEMENT_ROW_HEIGHT
+        )
+
+    def _port_contains(self, port: QPointF, point: QPointF, padding: int) -> bool:
+        """Return whether a point lies within a padded graph port."""
+        return (point.x() - port.x()) ** 2 + (point.y() - port.y()) ** 2 <= (
+            self.PORT_RADIUS + padding
+        ) ** 2
 
     def _graph_point(self, point: QPointF) -> QPointF:
         """Convert widget coordinates into zoomed graph coordinates."""
@@ -2382,6 +2627,7 @@ class ScreenFlowWidget(QWidget):
         self.session = session
         self._updating = False
         self.simulated_screen_id = session.project.start_screen_id
+        self.simulated_element_id = ""
         self.live_controller = LiveSimulatorController(self)
         self._live_import_root = ""
         self._build_interface()
@@ -2393,10 +2639,10 @@ class ScreenFlowWidget(QWidget):
         layout = QHBoxLayout(self)
         controls = QWidget()
         controls_layout = QVBoxLayout(controls)
-        relation_group = QGroupBox("Screen relation")
+        relation_group = QGroupBox("Navigation relation")
         relation_form = QFormLayout(relation_group)
         connection_hint = QLabel(
-            "Drag from a node's blue right port to another node's green left port."
+            "Drag a blue screen or element port to a green screen or element port."
         )
         connection_hint.setWordWrap(True)
         relation_form.addRow(connection_hint)
@@ -2537,6 +2783,7 @@ class ScreenFlowWidget(QWidget):
         self.update_relation_button.clicked.connect(self._update_relation)
         self.delete_relation_button.clicked.connect(self._delete_relation)
         self.connection_list.currentRowChanged.connect(self._connection_selected)
+        self.source_combo.currentIndexChanged.connect(self._source_endpoint_changed)
         self.start_screen_button.clicked.connect(self._set_start_screen)
         self.open_screen_button.clicked.connect(self._open_selected_screen)
         self.auto_layout_button.clicked.connect(self._auto_layout_nodes)
@@ -2574,8 +2821,17 @@ class ScreenFlowWidget(QWidget):
         self.target_combo.clear()
         self.capture_screen_combo.clear()
         for screen in self.session.project.screens:
-            self.source_combo.addItem(screen.name, screen.id)
-            self.target_combo.addItem(screen.name, screen.id)
+            screen_key = flow_endpoint_key(screen.id)
+            self.source_combo.addItem(f"Screen · {screen.name}", screen_key)
+            self.target_combo.addItem(f"Screen · {screen.name}", screen_key)
+            for element in self.graph._navigation_elements(screen):
+                endpoint_key = flow_endpoint_key(screen.id, element.id)
+                label = (
+                    f"{screen.name} / {element.kind} · {element.name}"
+                    f" [{element.activation_event()}]"
+                )
+                self.source_combo.addItem(label, endpoint_key)
+                self.target_combo.addItem(label, endpoint_key)
             self.capture_screen_combo.addItem(screen.name, screen.id)
         self._restore_combo(self.source_combo, selected_source)
         self._restore_combo(self.target_combo, selected_target)
@@ -2586,7 +2842,7 @@ class ScreenFlowWidget(QWidget):
         self.connection_list.clear()
         self.update_relation_button.setEnabled(True)
         self.delete_relation_button.setEnabled(True)
-        self._set_relation_fields_enabled(True, False)
+        self._set_relation_fields_enabled(True, False, False)
         for connection in self.session.project.connections:
             source = self.session.project.screen(connection.source_id)
             target = self.session.project.screen(connection.target_id)
@@ -2595,8 +2851,26 @@ class ScreenFlowWidget(QWidget):
             prefix = "[code] " if connection.source_path else ""
             if connection.locked:
                 prefix = "[locked] "
+            source_element = self.session.project.element(
+                connection.source_id,
+                connection.source_element_id,
+            )
+            target_element = self.session.project.element(
+                connection.target_id,
+                connection.target_element_id,
+            )
+            source_label = (
+                f"{source.name}/{source_element.name}"
+                if source_element is not None
+                else source.name
+            )
+            target_label = (
+                f"{target.name}/{target_element.name}"
+                if target_element is not None
+                else target.name
+            )
             item = QListWidgetItem(
-                f"{prefix}{source.name} -- {connection.trigger} --> {target.name}"
+                f"{prefix}{source_label} -- {connection.trigger} --> {target_label}"
             )
             item.setData(Qt.ItemDataRole.UserRole, connection.id)
             if connection.source_path:
@@ -2616,25 +2890,69 @@ class ScreenFlowWidget(QWidget):
         self._updating = False
         if selected_connection_id:
             self._select_connection_id(selected_connection_id)
+        else:
+            self._source_endpoint_changed()
 
     def _restore_combo(self, combo: QComboBox, value: object) -> None:
         """Restore a combo selection by item data."""
         index = combo.findData(value)
         combo.setCurrentIndex(max(0, index))
 
+    def _source_trigger(self, screen_id: str, element_id: str) -> str:
+        """Return the configured trigger for a screen or element source."""
+        element = self.session.project.element(screen_id, element_id)
+        if element is not None:
+            return element.activation_event()
+        return self.trigger_edit.text().strip()
+
+    def _source_endpoint_changed(self) -> None:
+        """Load an element activation event when its endpoint is selected."""
+        if self._updating:
+            return
+        screen_id, element_id = parse_flow_endpoint(self.source_combo.currentData())
+        element = self.session.project.element(screen_id, element_id)
+        if element is not None:
+            self.trigger_edit.setText(element.activation_event())
+            self.trigger_edit.setEnabled(False)
+            self.trigger_edit.setToolTip(
+                "Edit this event in the element properties workspace."
+            )
+        else:
+            self.trigger_edit.setEnabled(True)
+            self.trigger_edit.setToolTip("Event name for a screen-level relation.")
+
     def _add_relation(self) -> None:
         """Add a relationship from the editor controls."""
-        source_id = str(self.source_combo.currentData())
-        target_id = str(self.target_combo.currentData())
-        trigger = self.trigger_edit.text().strip()
+        source_id, source_element_id = parse_flow_endpoint(
+            self.source_combo.currentData()
+        )
+        target_id, target_element_id = parse_flow_endpoint(
+            self.target_combo.currentData()
+        )
+        trigger = self._source_trigger(source_id, source_element_id)
         if not source_id or not target_id or not trigger:
             QMessageBox.information(
-                self, "Incomplete relation", "Choose screens and enter a trigger."
+                self,
+                "Incomplete relation",
+                "Choose endpoints and configure an activation event.",
             )
             return
-        self._create_relation(source_id, target_id, trigger)
+        self._create_relation(
+            source_id,
+            target_id,
+            trigger,
+            source_element_id,
+            target_element_id,
+        )
 
-    def _create_relation(self, source_id: str, target_id: str, trigger: str) -> None:
+    def _create_relation(
+        self,
+        source_id: str,
+        target_id: str,
+        trigger: str,
+        source_element_id: str = "",
+        target_element_id: str = "",
+    ) -> None:
         """Create one design relation from form or mouse-selected nodes."""
         duplicate = next(
             (
@@ -2643,13 +2961,21 @@ class ScreenFlowWidget(QWidget):
                 if connection.source_id == source_id
                 and connection.target_id == target_id
                 and connection.trigger == trigger
+                and connection.source_element_id == source_element_id
+                and connection.target_element_id == target_element_id
             ),
             None,
         )
         if duplicate is not None:
             self._select_connection_id(duplicate.id)
             return
-        connection = FlowConnection.create(source_id, target_id, trigger)
+        connection = FlowConnection.create(
+            source_id,
+            target_id,
+            trigger,
+            source_element_id,
+            target_element_id,
+        )
         connection.condition = self.condition_edit.text().strip()
         connection.action = self.action_edit.text().strip()
         connection.transition = self.transition_combo.currentText()
@@ -2657,13 +2983,31 @@ class ScreenFlowWidget(QWidget):
         self.session.mark_changed()
         self._select_connection_id(connection.id)
 
-    def _graph_connection_requested(self, source_id: str, target_id: str) -> None:
+    def _graph_connection_requested(
+        self,
+        source_id: str,
+        source_element_id: str,
+        target_id: str,
+        target_element_id: str,
+    ) -> None:
         """Create a relation from a mouse-drawn graph connection."""
-        self._restore_combo(self.source_combo, source_id)
-        self._restore_combo(self.target_combo, target_id)
-        trigger = self.trigger_edit.text().strip() or "select"
+        self._restore_combo(
+            self.source_combo,
+            flow_endpoint_key(source_id, source_element_id),
+        )
+        self._restore_combo(
+            self.target_combo,
+            flow_endpoint_key(target_id, target_element_id),
+        )
+        trigger = self._source_trigger(source_id, source_element_id) or "select"
         self.trigger_edit.setText(trigger)
-        self._create_relation(source_id, target_id, trigger)
+        self._create_relation(
+            source_id,
+            target_id,
+            trigger,
+            source_element_id,
+            target_element_id,
+        )
 
     def _select_connection_id(self, connection_id: str) -> None:
         """Select a relation list item by project identifier."""
@@ -2681,7 +3025,9 @@ class ScreenFlowWidget(QWidget):
         connection = self._selected_connection()
         if connection is None or connection.locked:
             return
-        target_id = str(self.target_combo.currentData())
+        target_id, target_element_id = parse_flow_endpoint(
+            self.target_combo.currentData()
+        )
         target = self.session.project.screen(target_id)
         if connection.source_path and (target is None or target.source_state is None):
             QMessageBox.information(
@@ -2691,12 +3037,21 @@ class ScreenFlowWidget(QWidget):
             )
             return
         connection.target_id = target_id
-        connection.trigger = self.trigger_edit.text().strip() or connection.trigger
+        connection.target_element_id = target_element_id
         if not connection.source_path:
-            connection.source_id = str(self.source_combo.currentData())
+            source_id, source_element_id = parse_flow_endpoint(
+                self.source_combo.currentData()
+            )
+            connection.source_id = source_id
+            connection.source_element_id = source_element_id
+            connection.trigger = (
+                self._source_trigger(source_id, source_element_id) or connection.trigger
+            )
             connection.condition = self.condition_edit.text().strip()
             connection.action = self.action_edit.text().strip()
             connection.transition = self.transition_combo.currentText()
+        else:
+            connection.trigger = self.trigger_edit.text().strip() or connection.trigger
         self.session.mark_changed()
 
     def _delete_relation(self) -> None:
@@ -2745,20 +3100,41 @@ class ScreenFlowWidget(QWidget):
         self.graph.update()
         self.update_relation_button.setEnabled(not connection.locked)
         self.delete_relation_button.setEnabled(not bool(connection.source_path))
-        self._restore_combo(self.source_combo, connection.source_id)
-        self._restore_combo(self.target_combo, connection.target_id)
+        self._restore_combo(
+            self.source_combo,
+            flow_endpoint_key(
+                connection.source_id,
+                connection.source_element_id,
+            ),
+        )
+        self._restore_combo(
+            self.target_combo,
+            flow_endpoint_key(
+                connection.target_id,
+                connection.target_element_id,
+            ),
+        )
         self.trigger_edit.setText(connection.trigger)
         self.condition_edit.setText(connection.condition)
         self.action_edit.setText(connection.action)
         self.transition_combo.setCurrentText(connection.transition)
         source_backed = bool(connection.source_path)
-        self._set_relation_fields_enabled(not connection.locked, source_backed)
+        self._set_relation_fields_enabled(
+            not connection.locked,
+            source_backed,
+            bool(connection.source_element_id),
+        )
 
-    def _set_relation_fields_enabled(self, editable: bool, source_backed: bool) -> None:
+    def _set_relation_fields_enabled(
+        self,
+        editable: bool,
+        source_backed: bool,
+        element_source: bool,
+    ) -> None:
         """Limit relation controls to fields that can reach source code."""
         self.source_combo.setEnabled(editable and not source_backed)
         self.target_combo.setEnabled(editable)
-        self.trigger_edit.setEnabled(editable)
+        self.trigger_edit.setEnabled(editable and not element_source)
         self.condition_edit.setEnabled(editable and not source_backed)
         self.action_edit.setEnabled(editable and not source_backed)
         self.transition_combo.setEnabled(editable and not source_backed)
@@ -2782,7 +3158,7 @@ class ScreenFlowWidget(QWidget):
         """Load a selected graph node as relation source."""
         self.connection_list.clearSelection()
         self.graph.selected_connection_id = None
-        self._restore_combo(self.source_combo, screen_id)
+        self._restore_combo(self.source_combo, flow_endpoint_key(screen_id))
 
     def _set_start_screen(self) -> None:
         """Set the selected graph screen as project start."""
@@ -2822,13 +3198,16 @@ class ScreenFlowWidget(QWidget):
         for screen in project.screens:
             levels.setdefault(screen.id, fallback_level)
         rows: dict[int, int] = {}
+        vertical_step = (
+            max(self.graph._node_height(screen) for screen in project.screens) + 60
+        )
         changed = False
         for screen in project.screens:
             level = levels[screen.id]
             row = rows.get(level, 0)
             rows[level] = row + 1
             x = 60 + level * (self.graph.NODE_WIDTH + 100)
-            y = 60 + row * (self.graph.NODE_HEIGHT + 60)
+            y = round(60 + row * vertical_step)
             if (screen.node_x, screen.node_y) != (x, y):
                 screen.node_x, screen.node_y = x, y
                 changed = True
@@ -3033,6 +3412,7 @@ class ScreenFlowWidget(QWidget):
             self.simulator_result_label.setText(f"No transition handles {event!r}.")
             return
         self.simulated_screen_id = connection.target_id
+        self.simulated_element_id = connection.target_element_id
         result = f"Transition: {connection.transition}"
         if connection.condition:
             result += f" | condition: {connection.condition}"
@@ -3051,6 +3431,7 @@ class ScreenFlowWidget(QWidget):
     def _reset_simulator(self) -> None:
         """Reset navigation simulation to the start screen."""
         self.simulated_screen_id = self.session.project.start_screen_id
+        self.simulated_element_id = ""
         self.simulator_result_label.setText("Ready")
         self._update_simulator()
 
@@ -3059,4 +3440,7 @@ class ScreenFlowWidget(QWidget):
         screen = self.session.project.screen(self.simulated_screen_id)
         name = screen.name if screen is not None else "Missing screen"
         self.simulator_label.setText(f"Current screen: {name}")
-        self.preview.set_screen(self.simulated_screen_id)
+        self.preview.set_screen(
+            self.simulated_screen_id,
+            self.simulated_element_id,
+        )

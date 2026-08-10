@@ -70,6 +70,8 @@ class GuiElement:
     editor_locked: bool = False
     focusable: bool = False
     focus_order: int = 0
+    enabled: bool = True
+    event_name: str = ""
 
     @classmethod
     def create(cls, kind: str, index: int) -> GuiElement:
@@ -105,6 +107,10 @@ class GuiElement:
         """Create an element from persisted values."""
         allowed = cls.__dataclass_fields__
         return cls(**{key: value for key, value in values.items() if key in allowed})
+
+    def activation_event(self) -> str:
+        """Return the configured activation event or the element name fallback."""
+        return self.event_name.strip() or self.name
 
 
 @dataclass
@@ -164,11 +170,23 @@ class FlowConnection:
     source_trigger_segment: str = ""
     source_assignment_segment: str = ""
     source_values: dict[str, Any] = field(default_factory=dict)
+    source_element_id: str = ""
+    target_element_id: str = ""
 
     @classmethod
-    def create(cls, source_id: str, target_id: str, trigger: str) -> FlowConnection:
+    def create(
+        cls,
+        source_id: str,
+        target_id: str,
+        trigger: str,
+        source_element_id: str = "",
+        target_element_id: str = "",
+    ) -> FlowConnection:
         """Create one screen-flow connection."""
-        return cls(new_identifier("flow"), source_id, target_id, trigger)
+        connection = cls(new_identifier("flow"), source_id, target_id, trigger)
+        connection.source_element_id = source_element_id
+        connection.target_element_id = target_element_id
+        return connection
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> FlowConnection:
@@ -188,7 +206,7 @@ class GuiProject:
     screens: list[ScreenDesign]
     connections: list[FlowConnection] = field(default_factory=list)
     start_screen_id: str = ""
-    format_version: int = 2
+    format_version: int = 3
     import_root: str = ""
     imported_sources: dict[str, str] = field(default_factory=dict)
 
@@ -216,7 +234,7 @@ class GuiProject:
             screens,
             connections,
             str(values.get("start_screen_id", "")),
-            int(values.get("format_version", 1)),
+            max(3, int(values.get("format_version", 1))),
             str(values.get("import_root", "")),
             {
                 str(path): str(digest)
@@ -238,6 +256,16 @@ class GuiProject:
     def screen(self, screen_id: str) -> ScreenDesign | None:
         """Return a screen by identifier."""
         return next((screen for screen in self.screens if screen.id == screen_id), None)
+
+    def element(self, screen_id: str, element_id: str) -> GuiElement | None:
+        """Return one element when it belongs to the requested screen."""
+        screen = self.screen(screen_id)
+        if screen is None or not element_id:
+            return None
+        return next(
+            (element for element in screen.elements if element.id == element_id),
+            None,
+        )
 
     def save(self, path: str | Path) -> None:
         """Atomically save the editable designer project."""
@@ -337,7 +365,8 @@ def generate_python(project: GuiProject) -> str:
                     f"                self._run_action({connection.action!r})\n"
                 )
             lines.append(f"                self.screen = {target.name!r}\n")
-            lines.append("                self.focus_index = 0\n")
+            focus_index = _connection_focus_index(project, connection)
+            lines.append(f"                self.focus_index = {focus_index}\n")
             lines.append(
                 f"                self.last_transition = {connection.transition!r}\n"
             )
@@ -384,9 +413,9 @@ def generate_python(project: GuiProject) -> str:
     for index, screen in enumerate(project.screens):
         keyword = "if" if index == 0 else "elif"
         focusable = [
-            (element.focus_order, element_index, element.name)
+            (element.focus_order, element_index, element.activation_event())
             for element_index, element in enumerate(screen.elements)
-            if element.visible and element.focusable
+            if element.visible and element.enabled and element.focusable
         ]
         names = tuple(item[2] for item in sorted(focusable))
         lines.append(f"        {keyword} self.screen == {screen.name!r}:\n")
@@ -486,6 +515,28 @@ def _screen_python(screen: ScreenDesign) -> list[str]:
         if element.visible:
             lines.extend(_element_python(element))
     return lines
+
+
+def _connection_focus_index(
+    project: GuiProject,
+    connection: FlowConnection,
+) -> int:
+    """Return the destination focus index for one generated transition."""
+    if not connection.target_element_id:
+        return 0
+    target = project.screen(connection.target_id)
+    if target is None:
+        return 0
+    focusable = [
+        (element.focus_order, index, element.id)
+        for index, element in enumerate(target.elements)
+        if element.visible and element.enabled and element.focusable
+    ]
+    ordered = [item[2] for item in sorted(focusable)]
+    try:
+        return ordered.index(connection.target_element_id)
+    except ValueError:
+        return 0
 
 
 def _element_python(element: GuiElement) -> list[str]:
