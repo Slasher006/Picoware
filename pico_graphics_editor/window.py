@@ -98,7 +98,9 @@ class DiffDialog(QDialog):
             QDialogButtonBox.StandardButton.Apply
             | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self.accept)
+        buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(
+            self.accept
+        )
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
@@ -318,7 +320,9 @@ class MultiPatchDialog(QDialog):
             QDialogButtonBox.StandardButton.Apply
             | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self.accept)
+        buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(
+            self.accept
+        )
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 

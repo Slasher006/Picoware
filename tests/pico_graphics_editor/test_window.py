@@ -16,12 +16,17 @@ if str(REPOSITORY_PATH) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_PATH))
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QMessageBox,
+)
 
 from pico_graphics_editor.model import PixelArt
-from pico_graphics_editor.source import build_new_graphic_patch
+from pico_graphics_editor.source import SourcePatch, build_new_graphic_patch
 from pico_graphics_editor.designer_model import GuiProject
-from pico_graphics_editor.window import DiffDialog, MainWindow
+from pico_graphics_editor.window import DiffDialog, MainWindow, MultiPatchDialog
 
 
 ANIMATION_SOURCE = '''class Renderer:
@@ -78,6 +83,24 @@ class WindowTests(unittest.TestCase):
         )
         self.assertTrue(self.window.import_existing_app_action.isEnabled())
         self.assertFalse(self.window.apply_imported_app_action.isEnabled())
+
+    def test_apply_buttons_accept_source_review_dialogs(self) -> None:
+        """Close source review dialogs when their Apply buttons are clicked."""
+        source_patch = SourcePatch(
+            Path(self.temporary.name) / "review.py",
+            "",
+            "",
+            "",
+            "review",
+            0,
+        )
+        dialogs = (DiffDialog(source_patch), MultiPatchDialog([source_patch]))
+        for dialog in dialogs:
+            buttons = dialog.findChild(QDialogButtonBox)
+            apply_button = buttons.button(QDialogButtonBox.StandardButton.Apply)
+            apply_button.click()
+            self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+            dialog.close()
 
     def test_designer_workspace_uses_project_undo_history(self) -> None:
         """Route global undo and redo actions to the GUI designer."""
