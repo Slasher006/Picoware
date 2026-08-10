@@ -160,6 +160,7 @@ class SourceTests(unittest.TestCase):
         patch = build_new_graphic_patch(target, "draw_ship", [first, second])
         ast.parse(patch.updated)
         self.assertIn("def draw_ship(draw, x, y, frame=0):", patch.updated)
+        self.assertIn("_pico_graphic_size = (4, 4)", patch.updated)
         self.assertIn("if frame == 1:", patch.updated)
         self.assertEqual(patch.run_count, 2)
         backup = patch.apply(self.root / "backups")
@@ -169,6 +170,39 @@ class SourceTests(unittest.TestCase):
         self.assertIsNone(backup)
         self.assertEqual(generated.variants["frame"], list(range(8)))
         self.assertGreaterEqual(len(trace.primitives), 1)
+        self.assertEqual((trace.current_art.width, trace.current_art.height), (4, 4))
+
+    def test_blank_new_graphic_is_discoverable_at_requested_size(self) -> None:
+        """Discover an empty generated graphic without fake visible pixels."""
+        target = self.root / "blank_graphic.py"
+        patch = build_new_graphic_patch(target, "draw_blank_icon", [PixelArt(19, 13)])
+        patch.apply(self.root / "backups")
+        assets = self.scanner.scan_file(target)
+        generated = next(
+            asset for asset in assets if asset.record.name == "draw_blank_icon"
+        )
+        trace = self.tracer.render(generated)
+        self.assertEqual(trace.primitives, [])
+        self.assertEqual((trace.current_art.width, trace.current_art.height), (19, 13))
+        self.assertTrue(all(color is None for color in trace.current_art.pixels))
+
+    def test_legacy_blank_generated_graphic_is_discoverable(self) -> None:
+        """Open a blank generated function created before size metadata."""
+        target = self.root / "legacy_graphic.py"
+        target.write_text(
+            "# Pico graphic draw_new_graphic begin\n"
+            "def draw_new_graphic(draw, x, y):\n"
+            '    """Draw generated RGB565 pixel graphics."""\n'
+            "    pass\n"
+            "# Pico graphic draw_new_graphic end\n",
+            encoding="utf-8",
+        )
+        assets = self.scanner.scan_file(target)
+        generated = next(
+            asset for asset in assets if asset.record.name == "draw_new_graphic"
+        )
+        trace = self.tracer.render(generated)
+        self.assertEqual((trace.current_art.width, trace.current_art.height), (32, 32))
 
 
 if __name__ == "__main__":

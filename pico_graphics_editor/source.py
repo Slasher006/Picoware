@@ -77,6 +77,10 @@ GRAPHICS_WORDS = (
 MARKER_PATTERN = re.compile(
     r"^(?P<indent>\s*)# Pixel overlay (?P<key>[0-9a-f]{10}) (?P<edge>begin|end)\s*$"
 )
+GENERATED_GRAPHIC_PATTERN = re.compile(
+    r"^# Pico graphic (?P<name>[A-Za-z_]\w*) begin\s*$", re.MULTILINE
+)
+GENERATED_GRAPHIC_SIZE = "_pico_graphic_size"
 
 
 class UnknownValue:
@@ -399,6 +403,9 @@ class SourceScanner:
         tree = ast.parse(source, filename=str(source_path))
         functions = collect_functions(tree)
         graphics_names = discover_graphics(functions)
+        graphics_names.update(
+            name for name in generated_graphic_names(source) if name in functions
+        )
         document = SourceDocument(
             source_path,
             source,
@@ -502,7 +509,15 @@ class TraceInterpreter:
         base_primitives = [
             primitive for primitive in primitives if not primitive.generated
         ]
-        base_art = rasterize_primitives(base_primitives)
+        explicit_size = generated_graphic_size(asset.record.node)
+        if explicit_size is not None:
+            base_art = PixelArt(*explicit_size)
+        elif not base_primitives and asset.record.name in generated_graphic_names(
+            asset.document.source
+        ):
+            base_art = PixelArt(32, 32)
+        else:
+            base_art = rasterize_primitives(base_primitives)
         current_art = rasterize_aligned(primitives, base_art)
         anchor = anchors[-1] if anchors else function_anchor
         return TraceResult(primitives, base_art, current_art, anchor, warnings)
@@ -776,6 +791,7 @@ def _new_graphic_source(function_name: str, frames: list[PixelArt]) -> tuple[str
         f"# Pico graphic {function_name} begin\n",
         f"def {function_name}({parameters}):\n",
         '    """Draw generated RGB565 pixel graphics."""\n',
+        f"    {GENERATED_GRAPHIC_SIZE} = ({frames[0].width}, {frames[0].height})\n",
     ]
     run_count = 0
     for frame_index, art in enumerate(frames):
@@ -849,6 +865,35 @@ def collect_functions(tree: ast.Module) -> dict[str, FunctionRecord]:
                     ),
                 )
     return records
+
+
+def generated_graphic_names(source: str) -> set[str]:
+    """Return module functions enclosed by generated graphic markers."""
+    return {match.group("name") for match in GENERATED_GRAPHIC_PATTERN.finditer(source)}
+
+
+def generated_graphic_size(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[int, int] | None:
+    """Return explicit generated canvas dimensions when available."""
+    for statement in node.body:
+        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+            continue
+        target = statement.targets[0]
+        if not isinstance(target, ast.Name) or target.id != GENERATED_GRAPHIC_SIZE:
+            continue
+        try:
+            value = ast.literal_eval(statement.value)
+        except (TypeError, ValueError):
+            return None
+        if (
+            isinstance(value, tuple)
+            and len(value) == 2
+            and all(type(item) is int and 1 <= item <= 320 for item in value)
+        ):
+            return value
+        return None
+    return None
 
 
 def collect_call_names(node: ast.AST) -> set[str]:
