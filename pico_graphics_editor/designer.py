@@ -2201,11 +2201,15 @@ class FlowCanvas(QWidget):
     connection_requested = Signal(str, str, str, str)
     connection_selected = Signal(str)
     connection_delete_requested = Signal(str)
+    scroll_requested = Signal(int, int)
+    zoom_changed = Signal(float)
 
     NODE_WIDTH = 200
     NODE_HEIGHT = 140
     ELEMENT_ROW_HEIGHT = 22
     PORT_RADIUS = 7
+    MIN_ZOOM = 0.05
+    MAX_ZOOM = 2.0
 
     def __init__(self, session: DesignerSession, parent: QWidget | None = None):
         """Initialize the draggable screen graph."""
@@ -2216,6 +2220,8 @@ class FlowCanvas(QWidget):
         self.zoom = 1.0
         self._drag_offset = QPointF()
         self._node_dragging = False
+        self._panning = False
+        self._pan_position = QPointF()
         self._connection_source_id: str | None = None
         self._connection_source_element_id: str | None = None
         self._connection_point = QPointF()
@@ -2224,6 +2230,7 @@ class FlowCanvas(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(1400, 900)
+        self.refresh_geometry()
 
     def paintEvent(self, event) -> None:
         """Paint graph connections followed by screen nodes."""
@@ -2250,6 +2257,12 @@ class FlowCanvas(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Begin a node move or connection drag."""
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._panning = True
+            self._pan_position = event.position()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             return
         point = self._graph_point(event.position())
@@ -2294,6 +2307,12 @@ class FlowCanvas(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         """Move a node or preview a dragged connection."""
+        if self._panning and event.buttons() & Qt.MouseButton.MiddleButton:
+            delta = event.position() - self._pan_position
+            self._pan_position = event.position()
+            self.scroll_requested.emit(-round(delta.x()), -round(delta.y()))
+            event.accept()
+            return
         if not (event.buttons() & Qt.MouseButton.LeftButton):
             return
         point = self._graph_point(event.position())
@@ -2317,11 +2336,18 @@ class FlowCanvas(QWidget):
             return
         screen.node_x = max(10, round(point.x() - self._drag_offset.x()))
         screen.node_y = max(10, round(point.y() - self._drag_offset.y()))
+        self.refresh_geometry()
         self.session.mark_changed(False)
         self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         """Finish a node move or create the dragged connection."""
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._panning = False
+            self._pan_position = QPointF()
+            self.unsetCursor()
+            event.accept()
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             return
         source_id = self._connection_source_id
@@ -2360,9 +2386,45 @@ class FlowCanvas(QWidget):
         if not delta:
             super().wheelEvent(event)
             return
-        self.zoom = max(0.5, min(2.0, self.zoom + (0.1 if delta > 0 else -0.1)))
-        self.update()
+        old_zoom = self.zoom
+        new_zoom = max(
+            self.MIN_ZOOM,
+            min(self.MAX_ZOOM, round(old_zoom + (0.1 if delta > 0 else -0.1), 2)),
+        )
+        if new_zoom != old_zoom:
+            position = event.position()
+            factor = new_zoom / old_zoom
+            self.set_zoom(new_zoom)
+            self.scroll_requested.emit(
+                round(position.x() * (factor - 1)),
+                round(position.y() * (factor - 1)),
+            )
         event.accept()
+
+    def set_zoom(self, zoom: float) -> None:
+        """Set graph zoom within its supported overview range."""
+        value = max(self.MIN_ZOOM, min(self.MAX_ZOOM, float(zoom)))
+        if value == self.zoom:
+            return
+        self.zoom = value
+        self.refresh_geometry()
+        self.zoom_changed.emit(value)
+        self.update()
+
+    def refresh_geometry(self) -> None:
+        """Resize the canvas to include all scaled graph nodes."""
+        project = self.session.project
+        right = max(
+            (screen.node_x + self.NODE_WIDTH for screen in project.screens),
+            default=0,
+        )
+        bottom = max(
+            (screen.node_y + self._node_height(screen) for screen in project.screens),
+            default=0,
+        )
+        width = max(1400, round((right + 120) * self.zoom))
+        height = max(900, round((bottom + 120) * self.zoom))
+        self.resize(width, height)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         """Delete the selected design relation from the graph."""
@@ -2803,11 +2865,24 @@ class ScreenFlowWidget(QWidget):
         layout.addWidget(controls)
 
         graph_splitter = QSplitter(Qt.Orientation.Vertical)
-        graph_scroll = QScrollArea()
+        graph_panel = QWidget()
+        graph_layout = QVBoxLayout(graph_panel)
+        graph_layout.setContentsMargins(0, 0, 0, 0)
+        graph_toolbar = QHBoxLayout()
+        graph_hint = QLabel("Mouse wheel: zoom · Hold middle mouse: pan")
+        self.graph_zoom_label = QLabel("Zoom: 100%")
+        self.fit_graph_button = QPushButton("Fit all nodes")
+        graph_toolbar.addWidget(graph_hint)
+        graph_toolbar.addStretch(1)
+        graph_toolbar.addWidget(self.graph_zoom_label)
+        graph_toolbar.addWidget(self.fit_graph_button)
+        graph_layout.addLayout(graph_toolbar)
+        self.graph_scroll = QScrollArea()
         self.graph = FlowCanvas(self.session)
-        graph_scroll.setWidget(self.graph)
-        graph_scroll.setWidgetResizable(False)
-        graph_splitter.addWidget(graph_scroll)
+        self.graph_scroll.setWidget(self.graph)
+        self.graph_scroll.setWidgetResizable(False)
+        graph_layout.addWidget(self.graph_scroll, 1)
+        graph_splitter.addWidget(graph_panel)
 
         preview_panel = QGroupBox("Screen preview")
         preview_layout = QVBoxLayout(preview_panel)
@@ -2882,6 +2957,9 @@ class ScreenFlowWidget(QWidget):
         self.graph.connection_requested.connect(self._graph_connection_requested)
         self.graph.connection_selected.connect(self._select_connection_id)
         self.graph.connection_delete_requested.connect(self._delete_connection_id)
+        self.graph.scroll_requested.connect(self._scroll_graph)
+        self.graph.zoom_changed.connect(self._graph_zoom_changed)
+        self.fit_graph_button.clicked.connect(self._fit_graph_nodes)
         self.add_relation_button.clicked.connect(self._add_relation)
         self.update_relation_button.clicked.connect(self._update_relation)
         self.delete_relation_button.clicked.connect(self._delete_relation)
@@ -2912,6 +2990,44 @@ class ScreenFlowWidget(QWidget):
         self.live_controller.running_changed.connect(self._live_running_changed)
         self._update_preview_mode()
         self._live_target_kind_changed(self.live_target_kind_combo.currentText())
+
+    def _scroll_graph(self, horizontal: int, vertical: int) -> None:
+        """Move the graph viewport by physical canvas pixels."""
+        horizontal_bar = self.graph_scroll.horizontalScrollBar()
+        vertical_bar = self.graph_scroll.verticalScrollBar()
+        horizontal_bar.setValue(horizontal_bar.value() + horizontal)
+        vertical_bar.setValue(vertical_bar.value() + vertical)
+
+    def _graph_zoom_changed(self, zoom: float) -> None:
+        """Show the current node graph zoom percentage."""
+        self.graph_zoom_label.setText(f"Zoom: {round(zoom * 100)}%")
+
+    def _fit_graph_nodes(self) -> None:
+        """Fit every graph node into the current viewport."""
+        screens = self.session.project.screens
+        if not screens:
+            return
+        left = min(screen.node_x for screen in screens)
+        top = min(screen.node_y for screen in screens)
+        right = max(screen.node_x + self.graph.NODE_WIDTH for screen in screens)
+        bottom = max(
+            screen.node_y + self.graph._node_height(screen) for screen in screens
+        )
+        viewport = self.graph_scroll.viewport().size()
+        available_width = max(1, viewport.width() - 60)
+        available_height = max(1, viewport.height() - 60)
+        content_width = max(1, right - left)
+        content_height = max(1, bottom - top)
+        zoom = min(
+            1.0,
+            available_width / content_width,
+            available_height / content_height,
+        )
+        self.graph.set_zoom(zoom)
+        horizontal_bar = self.graph_scroll.horizontalScrollBar()
+        vertical_bar = self.graph_scroll.verticalScrollBar()
+        horizontal_bar.setValue(max(0, round(left * self.graph.zoom - 30)))
+        vertical_bar.setValue(max(0, round(top * self.graph.zoom - 30)))
 
     def refresh(self) -> None:
         """Refresh graph controls from the shared project."""
@@ -2989,6 +3105,7 @@ class ScreenFlowWidget(QWidget):
             self.graph.selected_connection_id = None
         self._update_simulator()
         self._update_live_target_defaults()
+        self.graph.refresh_geometry()
         self.graph.update()
         self._updating = False
         if selected_connection_id:

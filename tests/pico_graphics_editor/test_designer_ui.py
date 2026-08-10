@@ -14,7 +14,7 @@ if str(REPOSITORY_PATH) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_PATH))
 
 from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt
-from PySide6.QtGui import QDropEvent
+from PySide6.QtGui import QDropEvent, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -371,6 +371,80 @@ class DesignerUiTests(unittest.TestCase):
         )
         self.assertEqual((screen.node_x, screen.node_y), (110, 100))
         self.assertEqual(session.project.connections, [])
+        widget.close()
+
+    def test_node_graph_pans_with_middle_mouse_drag(self) -> None:
+        """Pan the scrollable node view while holding the middle mouse button."""
+        session = DesignerSession()
+        widget = ScreenFlowWidget(session)
+        widget.resize(1000, 800)
+        widget.show()
+        self.application.processEvents()
+        horizontal = widget.graph_scroll.horizontalScrollBar()
+        vertical = widget.graph_scroll.verticalScrollBar()
+        horizontal.setValue(250)
+        vertical.setValue(180)
+        start = QPoint(horizontal.value() + 260, vertical.value() + 220)
+        destination = start - QPoint(70, 50)
+        before = (horizontal.value(), vertical.value())
+        QTest.mousePress(
+            widget.graph,
+            Qt.MouseButton.MiddleButton,
+            Qt.KeyboardModifier.NoModifier,
+            start,
+        )
+        QTest.mouseMove(widget.graph, destination)
+        QTest.mouseRelease(
+            widget.graph,
+            Qt.MouseButton.MiddleButton,
+            Qt.KeyboardModifier.NoModifier,
+            destination,
+        )
+        self.assertGreater(horizontal.value(), before[0])
+        self.assertGreater(vertical.value(), before[1])
+        widget.close()
+
+    def test_node_graph_zooms_out_and_fits_all_nodes(self) -> None:
+        """Allow a large graph to fit into one node-editor viewport."""
+        project = GuiProject.create("Large Flow")
+        distant = ScreenDesign.create("Distant", 320, 320, 1)
+        distant.node_x = 9000
+        distant.node_y = 4200
+        project.screens.append(distant)
+        session = DesignerSession()
+        session.set_project(project)
+        widget = ScreenFlowWidget(session)
+        widget.resize(1100, 850)
+        widget.show()
+        self.application.processEvents()
+        for unused in range(15):
+            event = QWheelEvent(
+                QPointF(300, 200),
+                QPointF(300, 200),
+                QPoint(),
+                QPoint(0, -120),
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+                Qt.ScrollPhase.ScrollUpdate,
+                False,
+            )
+            widget.graph.wheelEvent(event)
+        self.assertEqual(widget.graph.zoom, widget.graph.MIN_ZOOM)
+        self.assertEqual(widget.graph_zoom_label.text(), "Zoom: 5%")
+        widget.graph.set_zoom(1.0)
+        widget._fit_graph_nodes()
+        viewport = widget.graph_scroll.viewport().size()
+        graph_width = (
+            distant.node_x + widget.graph.NODE_WIDTH - project.screens[0].node_x
+        )
+        graph_height = (
+            distant.node_y
+            + widget.graph._node_height(distant)
+            - project.screens[0].node_y
+        )
+        self.assertLess(widget.graph.zoom, 0.2)
+        self.assertLessEqual(graph_width * widget.graph.zoom, viewport.width() - 50)
+        self.assertLessEqual(graph_height * widget.graph.zoom, viewport.height() - 50)
         widget.close()
 
     def test_locked_imported_element_is_read_only(self) -> None:
