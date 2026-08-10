@@ -1019,27 +1019,62 @@ class MainWindow(QMainWindow):
         review = DiffDialog(patch, self)
         if review.exec() != QDialog.DialogCode.Accepted:
             return
-        backup_root = (
-            Path(
-                QStandardPaths.writableLocation(
-                    QStandardPaths.StandardLocation.AppDataLocation
-                )
-            )
-            / "backups"
-        )
+        backup_root = self._source_backup_root()
         try:
             backup = patch.apply(backup_root)
         except (OSError, SyntaxError, ValueError) as error:
             QMessageBox.critical(self, "Graphic creation failed", str(error))
             return
         detail = f"Backup: {backup}" if backup else "Created a new Python file."
-        QMessageBox.information(
-            self, "Graphic created", f"Updated {patch.path}.\n{detail}"
+        loaded = self._open_created_graphic(patch.path, patch.key)
+        next_step = (
+            "The new asset is loaded. Edit pixels and use Apply to Python."
+            if loaded
+            else "The file was saved, but you must open it manually before editing."
         )
-        if self._scan_path == patch.path:
-            self._scan(patch.path, False)
-        elif self._scan_folder and self._scan_path in patch.path.parents:
-            self._scan(self._scan_path, True)
+        QMessageBox.information(
+            self,
+            "Graphic created",
+            f"Updated {patch.path}.\n{detail}\n{next_step}",
+        )
+
+    def _open_created_graphic(self, path: Path, patch_key: str) -> bool:
+        """Scan and select the newly written pixel graphic function."""
+        target = path.resolve()
+        if (
+            self._scan_folder
+            and self._scan_path is not None
+            and self._scan_path.resolve() in target.parents
+        ):
+            scan_path = self._scan_path
+            scan_folder = True
+        else:
+            self._scan_path = target
+            self._scan_folder = False
+            scan_path = target
+            scan_folder = False
+        self._scan(scan_path, scan_folder)
+        expected_name = patch_key.removeprefix("new-graphic-")
+        row = next(
+            (
+                index
+                for index, asset in enumerate(self.assets)
+                if asset.document.path.resolve() == target
+                and asset.record.name == expected_name
+            ),
+            None,
+        )
+        if row is None:
+            QMessageBox.warning(
+                self,
+                "Graphic saved but not loaded",
+                f"Saved {target}, but its generated function was not discovered.",
+            )
+            return False
+        self.asset_list.setCurrentRow(row)
+        self.workspace_tabs.setCurrentIndex(0)
+        self.statusBar().showMessage(f"Created and loaded pixel asset: {target}")
+        return True
 
     def _workspace_changed(self, index: int) -> None:
         """Show tools relevant to the selected workspace."""
@@ -1177,6 +1212,17 @@ class MainWindow(QMainWindow):
             )
             / "backups"
             / "gui-projects"
+        )
+
+    def _source_backup_root(self) -> Path:
+        """Return the source-edit backup directory."""
+        return (
+            Path(
+                QStandardPaths.writableLocation(
+                    QStandardPaths.StandardLocation.AppDataLocation
+                )
+            )
+            / "backups"
         )
 
     def _designer_recovery_path(self) -> Path:
@@ -2054,14 +2100,7 @@ class MainWindow(QMainWindow):
         dialog = DiffDialog(patch, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        backup_root = (
-            Path(
-                QStandardPaths.writableLocation(
-                    QStandardPaths.StandardLocation.AppDataLocation
-                )
-            )
-            / "backups"
-        )
+        backup_root = self._source_backup_root()
         try:
             backup_path = patch.apply(backup_root)
         except Exception as error:

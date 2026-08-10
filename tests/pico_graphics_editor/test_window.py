@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch as mock_patch
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -14,10 +15,12 @@ REPOSITORY_PATH = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_PATH) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_PATH))
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
+from pico_graphics_editor.model import PixelArt
+from pico_graphics_editor.source import build_new_graphic_patch
 from pico_graphics_editor.designer_model import GuiProject
-from pico_graphics_editor.window import MainWindow
+from pico_graphics_editor.window import DiffDialog, MainWindow
 
 
 ANIMATION_SOURCE = '''class Renderer:
@@ -105,6 +108,36 @@ class WindowTests(unittest.TestCase):
         project_path.unlink()
         restored = GuiProject.load(backups[0])
         self.assertEqual(len(restored.screens[0].elements), 1)
+
+    def test_new_pixel_asset_loads_and_apply_writes_edits(self) -> None:
+        """Load a created asset so Apply writes later pixel changes."""
+        target = Path(self.temporary.name) / "new_asset.py"
+        art = PixelArt(2, 2)
+        art.set_pixel(0, 0, 0xF800)
+        source_patch = build_new_graphic_patch(target, "draw_badge", [art])
+        source_patch.apply(Path(self.temporary.name) / "creation-backups")
+        self.window._source_backup_root = lambda: (
+            Path(self.temporary.name) / "apply-backups"
+        )
+        self.assertTrue(self.window._open_created_graphic(target, source_patch.key))
+        self.assertIsNotNone(self.window.current_asset)
+        self.assertEqual(self.window.current_asset.record.name, "draw_badge")
+        self.assertEqual(self.window._scan_path, target.resolve())
+        self.window.canvas.art().set_pixel(0, 0, 0x07E0)
+        self.window._canvas_changed()
+        self.assertTrue(self.window.apply_button.isEnabled())
+        with (
+            mock_patch.object(
+                DiffDialog,
+                "exec",
+                return_value=QDialog.DialogCode.Accepted,
+            ),
+            mock_patch.object(QMessageBox, "information"),
+        ):
+            self.window.apply_button.click()
+        updated = target.read_text(encoding="utf-8")
+        self.assertIn("0x07E0", updated)
+        self.assertFalse(self.window._dirty)
 
     def test_animation_frames_can_be_duplicated_and_reordered(self) -> None:
         """Duplicate a source frame and change playback order."""

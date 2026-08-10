@@ -57,7 +57,7 @@ The **Reference image** panel supports PNG, JPEG, WebP, BMP, and GIF files. A re
 
 No AI conversion is used.
 
-**Create new Python graphic** creates a new module-level drawing function from the positioned reference or imported animation frames. The resulting RGB565 runs are reviewed before insertion and can be scanned back into the pixel editor for further work.
+**Create new Python graphic** creates a new module-level drawing function from the positioned reference or imported animation frames. After the reviewed RGB565 runs are written, the exact generated function is automatically loaded into the pixel editor. Further mouse edits enable **Apply to Python** and write back to the same destination.
 
 ## Animation frames
 
