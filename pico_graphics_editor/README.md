@@ -16,6 +16,8 @@ Install the desktop dependency:
 python3 -m pip install -r pico_graphics_editor/requirements.txt
 ```
 
+The embedded live view additionally requires the Unix `micropython` executable used by Picoware's simulator. The designer and source-safe previews remain available when it is not installed.
+
 Open the editor:
 
 ```bash
@@ -110,6 +112,18 @@ Every application screen is represented as a draggable node containing a live re
 One screen is marked as the start screen. Double-click a graph node to open it in the GUI designer. The navigation simulator accepts event names, follows matching relations, reports conditions and actions, and renders the resulting screen without running Pico hardware code.
 
 Each graph node has a green input port and blue output port. Drag from the blue port of one node to the green port or body of another node to create a relation with the values currently shown in the relation form. Click a relation line to select and edit it, or press Delete to remove a design-only relation. **Auto-layout graph** arranges screens by navigation depth. Nodes remain independently draggable, and mouse-wheel graph zoom continues to work.
+
+### Live simulator preview
+
+The Screen Flow preview supports **Designer**, **Live simulator**, and **Compare** views. Live mode launches Picoware's real MicroPython simulator as an isolated child process and embeds its RGB565 framebuffer directly in the Qt workspace; it does not open the separate SDL viewer window.
+
+For imported applications, the editor infers an Application or Game route from the imported path. The launch type, target name, and board remain editable, so external or unusual projects can be configured manually. Start, stop, or restart the child process from the preview toolbar. When **Reload on source changes** is enabled, saved Python changes restart the simulator automatically.
+
+Click the live framebuffer and use the keyboard to interact with it. Arrow keys, Enter, Escape, function keys, printable text, and touch/mouse input are forwarded through the simulator's normal input protocol. Network access is offline and audio is silent for predictable editor sessions.
+
+Use **Capture live frame for screen** to associate the current real framebuffer with a selected designer screen. The captured frame appears in that screen's list thumbnail and graph node until it is cleared or another GUI project is opened. Captures are intentionally transient and are not written into application source or the `*.picogui.json` project.
+
+Live mode executes application code. Failures remain contained in the simulator process and are shown below the preview; switch to **Compare** to keep the safe designer-rendered fallback visible beside the failed or partial runtime view.
 
 ## Supported source patterns
 

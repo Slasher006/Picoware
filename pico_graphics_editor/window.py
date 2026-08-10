@@ -384,6 +384,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         """Confirm before closing with unsaved painting."""
         if self._confirm_designer_discard() and self._confirm_discard():
+            self.screen_flow.shutdown_live_simulator()
             event.accept()
         else:
             event.ignore()

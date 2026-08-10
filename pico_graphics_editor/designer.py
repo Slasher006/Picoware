@@ -69,6 +69,12 @@ from .designer_model import (
     ScreenDesign,
     new_identifier,
 )
+from .live_simulator import (
+    SIMULATOR_BOARDS,
+    LiveSimulatorConfig,
+    LiveSimulatorController,
+    LiveSimulatorView,
+)
 from .model import rgb_to_rgb565
 from .reference import prepare_reference_image, read_image_frames
 
@@ -83,6 +89,7 @@ class DesignerSession(QObject):
     dirty_changed = Signal(bool)
     active_screen_changed = Signal(str)
     history_changed = Signal(bool, bool)
+    live_previews_changed = Signal()
 
     def __init__(self, parent: QObject | None = None):
         """Initialize a new unsaved GUI project."""
@@ -97,6 +104,7 @@ class DesignerSession(QObject):
         self._saved_snapshot = self.project.to_dict()
         self._transaction_snapshot: dict[str, object] | None = None
         self._transaction_depth = 0
+        self.live_screen_images: dict[str, QImage] = {}
 
     def set_project(self, project: GuiProject, path: Path | None = None) -> None:
         """Replace the current project and reset edit state."""
@@ -110,10 +118,12 @@ class DesignerSession(QObject):
         self._saved_snapshot = project.to_dict()
         self._transaction_snapshot = None
         self._transaction_depth = 0
+        self.live_screen_images.clear()
         self.project_changed.emit()
         self.active_screen_changed.emit(self.active_screen_id)
         self.dirty_changed.emit(False)
         self.history_changed.emit(False, False)
+        self.live_previews_changed.emit()
 
     def current_screen(self) -> ScreenDesign:
         """Return the active screen with a safe fallback."""
@@ -227,6 +237,18 @@ class DesignerSession(QObject):
         self._set_dirty(False)
         return target
 
+    def set_live_screen_image(self, screen_id: str, image: QImage) -> None:
+        """Associate a transient live simulator frame with one screen."""
+        if self.project.screen(screen_id) is None or image.isNull():
+            return
+        self.live_screen_images[screen_id] = image.copy()
+        self.live_previews_changed.emit()
+
+    def clear_live_screen_image(self, screen_id: str) -> None:
+        """Remove a transient live simulator frame from one screen."""
+        if self.live_screen_images.pop(screen_id, None) is not None:
+            self.live_previews_changed.emit()
+
 
 def draw_screen(
     painter: QPainter,
@@ -279,6 +301,34 @@ def screen_preview_image(screen: ScreenDesign, size: QSize) -> QImage:
     draw_screen(painter, screen, QRectF(image.rect()).adjusted(4, 4, -4, -4))
     painter.end()
     return image
+
+
+def live_preview_image(source: QImage, size: QSize) -> QImage:
+    """Fit a captured live frame into a compact opaque thumbnail."""
+    image = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor("#20242a"))
+    painter = QPainter(image)
+    target = QRectF(image.rect()).adjusted(4, 4, -4, -4)
+    draw_fitted_image(painter, source, target)
+    painter.setPen(QPen(QColor("#00bfff"), 1))
+    painter.drawRect(QRectF(image.rect()).adjusted(0, 0, -1, -1))
+    painter.end()
+    return image
+
+
+def draw_fitted_image(painter: QPainter, source: QImage, target: QRectF) -> None:
+    """Draw one image inside a target while preserving its aspect ratio."""
+    scale = min(target.width() / source.width(), target.height() / source.height())
+    width = source.width() * scale
+    height = source.height() * scale
+    fitted = QRectF(
+        target.x() + (target.width() - width) / 2,
+        target.y() + (target.height() - height) / 2,
+        width,
+        height,
+    )
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+    painter.drawImage(fitted, source)
 
 
 def draw_element(
@@ -1042,6 +1092,7 @@ class ScreenDesignerWidget(QWidget):
     def _connect_signals(self) -> None:
         """Connect designer controls to the shared project."""
         self.session.project_changed.connect(self.refresh)
+        self.session.live_previews_changed.connect(self.refresh)
         self.session.active_screen_changed.connect(self._active_screen_changed)
         self.screen_list.currentRowChanged.connect(self._screen_selected)
         self.screen_list.model().rowsMoved.connect(self._screens_reordered)
@@ -1135,8 +1186,14 @@ class ScreenDesignerWidget(QWidget):
         self.screen_list.clear()
         selected_row = 0
         for index, screen in enumerate(project.screens):
+            live_image = self.session.live_screen_images.get(screen.id)
+            preview_image = (
+                live_preview_image(live_image, QSize(76, 64))
+                if live_image is not None
+                else screen_preview_image(screen, QSize(76, 64))
+            )
             item = QListWidgetItem(
-                QIcon(QPixmap.fromImage(screen_preview_image(screen, QSize(76, 64)))),
+                QIcon(QPixmap.fromImage(preview_image)),
                 screen.name,
             )
             item.setSizeHint(QSize(190, 70))
@@ -1148,6 +1205,8 @@ class ScreenDesignerWidget(QWidget):
                 connection.source_id == screen.id for connection in project.connections
             )
             details = f"{incoming} incoming, {outgoing} outgoing"
+            if live_image is not None:
+                details += "\nLive simulator capture"
             if screen.source_path:
                 details += f"\n{screen.source_path}:{screen.source_line}"
             item.setToolTip(details)
@@ -2138,7 +2197,12 @@ class FlowCanvas(QWidget):
             self.NODE_WIDTH - 16,
             self.NODE_HEIGHT - 36,
         )
-        draw_screen(painter, screen, preview)
+        live_image = self.session.live_screen_images.get(screen.id)
+        if live_image is None:
+            draw_screen(painter, screen, preview)
+        else:
+            painter.fillRect(preview, QColor("#20242a"))
+            draw_fitted_image(painter, live_image, preview)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(QColor("#7f8b99"), 1))
         painter.drawRect(preview)
@@ -2150,8 +2214,13 @@ class FlowCanvas(QWidget):
         )
         if screen.source_path:
             painter.drawText(
-                QPointF(screen.node_x + self.NODE_WIDTH - 50, screen.node_y + 17),
+                QPointF(screen.node_x + self.NODE_WIDTH - 72, screen.node_y + 17),
                 "SOURCE",
+            )
+        if live_image is not None:
+            painter.drawText(
+                QPointF(screen.node_x + self.NODE_WIDTH - 35, screen.node_y + 17),
+                "LIVE",
             )
         if start:
             painter.drawText(QPointF(screen.node_x + 7, screen.node_y + 17), "START")
@@ -2312,6 +2381,8 @@ class ScreenFlowWidget(QWidget):
         self.session = session
         self._updating = False
         self.simulated_screen_id = session.project.start_screen_id
+        self.live_controller = LiveSimulatorController(self)
+        self._live_import_root = ""
         self._build_interface()
         self._connect_signals()
         self.refresh()
@@ -2387,14 +2458,75 @@ class ScreenFlowWidget(QWidget):
         graph_scroll.setWidget(self.graph)
         graph_scroll.setWidgetResizable(False)
         graph_splitter.addWidget(graph_scroll)
+
+        preview_panel = QGroupBox("Screen preview")
+        preview_layout = QVBoxLayout(preview_panel)
+        live_controls = QGridLayout()
+        self.preview_mode_combo = QComboBox()
+        self.preview_mode_combo.addItem("Designer", "designer")
+        self.preview_mode_combo.addItem("Live simulator", "live")
+        self.preview_mode_combo.addItem("Compare", "compare")
+        self.live_target_kind_combo = QComboBox()
+        self.live_target_kind_combo.addItems(
+            ("Desktop", "Application", "Game", "Library")
+        )
+        self.live_target_edit = QLineEdit()
+        self.live_target_edit.setPlaceholderText("Application or Library name")
+        self.live_board_combo = QComboBox()
+        self.live_board_combo.addItems(SIMULATOR_BOARDS)
+        self.live_auto_reload_check = QCheckBox("Reload on source changes")
+        self.live_auto_reload_check.setChecked(True)
+        self.start_live_button = QPushButton("Start")
+        self.restart_live_button = QPushButton("Restart")
+        self.stop_live_button = QPushButton("Stop")
+        self.restart_live_button.setEnabled(False)
+        self.stop_live_button.setEnabled(False)
+        live_controls.addWidget(QLabel("View"), 0, 0)
+        live_controls.addWidget(self.preview_mode_combo, 0, 1)
+        live_controls.addWidget(QLabel("Launch"), 0, 2)
+        live_controls.addWidget(self.live_target_kind_combo, 0, 3)
+        live_controls.addWidget(self.live_target_edit, 0, 4)
+        live_controls.addWidget(QLabel("Board"), 0, 5)
+        live_controls.addWidget(self.live_board_combo, 0, 6)
+        live_controls.addWidget(self.live_auto_reload_check, 0, 7)
+        live_controls.addWidget(self.start_live_button, 0, 8)
+        live_controls.addWidget(self.restart_live_button, 0, 9)
+        live_controls.addWidget(self.stop_live_button, 0, 10)
+        self.capture_screen_combo = QComboBox()
+        self.capture_live_button = QPushButton("Capture live frame for screen")
+        self.clear_live_capture_button = QPushButton("Clear capture")
+        self.live_safety_label = QLabel(
+            "Live mode runs application code in an isolated MicroPython process."
+        )
+        self.live_safety_label.setStyleSheet("color: #ef6c00;")
+        live_controls.addWidget(self.live_safety_label, 1, 0, 1, 5)
+        live_controls.addWidget(QLabel("Capture as"), 1, 5)
+        live_controls.addWidget(self.capture_screen_combo, 1, 6, 1, 2)
+        live_controls.addWidget(self.capture_live_button, 1, 8, 1, 2)
+        live_controls.addWidget(self.clear_live_capture_button, 1, 10)
+        preview_layout.addLayout(live_controls)
+        self.preview_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.preview = GuiPreview(self.session)
-        graph_splitter.addWidget(self.preview)
-        graph_splitter.setSizes((620, 260))
+        self.live_preview = LiveSimulatorView()
+        self.preview_splitter.addWidget(self.preview)
+        self.preview_splitter.addWidget(self.live_preview)
+        self.preview_splitter.setSizes((500, 500))
+        preview_layout.addWidget(self.preview_splitter, 1)
+        self.live_status_label = QLabel("Designer preview active.")
+        self.live_status_label.setWordWrap(True)
+        self.live_status_label.setMaximumHeight(72)
+        self.live_status_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        preview_layout.addWidget(self.live_status_label)
+        graph_splitter.addWidget(preview_panel)
+        graph_splitter.setSizes((560, 330))
         layout.addWidget(graph_splitter, 1)
 
     def _connect_signals(self) -> None:
         """Connect graph controls and simulator events."""
         self.session.project_changed.connect(self.refresh)
+        self.session.live_previews_changed.connect(self.graph.update)
         self.graph.screen_selected.connect(self._graph_screen_selected)
         self.graph.screen_activated.connect(self._open_screen)
         self.graph.connection_requested.connect(self._graph_connection_requested)
@@ -2412,6 +2544,23 @@ class ScreenFlowWidget(QWidget):
         self.simulator_event_edit.returnPressed.connect(self._send_simulator_event)
         self.preview.event_requested.connect(self._preview_event_requested)
         self.preview.focus_changed.connect(self._preview_focus_changed)
+        self.preview_mode_combo.currentIndexChanged.connect(self._update_preview_mode)
+        self.live_target_kind_combo.currentTextChanged.connect(
+            self._live_target_kind_changed
+        )
+        self.start_live_button.clicked.connect(self._start_live_simulator)
+        self.restart_live_button.clicked.connect(self.live_controller.restart)
+        self.stop_live_button.clicked.connect(self.live_controller.stop)
+        self.capture_live_button.clicked.connect(self._capture_live_frame)
+        self.clear_live_capture_button.clicked.connect(self._clear_live_capture)
+        self.live_preview.key_event.connect(self.live_controller.send_key)
+        self.live_preview.touch_event.connect(self.live_controller.send_touch)
+        self.live_controller.frame_ready.connect(self.live_preview.set_frame)
+        self.live_controller.status_changed.connect(self._live_status_changed)
+        self.live_controller.error_changed.connect(self._live_error_changed)
+        self.live_controller.running_changed.connect(self._live_running_changed)
+        self._update_preview_mode()
+        self._live_target_kind_changed(self.live_target_kind_combo.currentText())
 
     def refresh(self) -> None:
         """Refresh graph controls from the shared project."""
@@ -2419,13 +2568,20 @@ class ScreenFlowWidget(QWidget):
         selected_connection_id = self.graph.selected_connection_id
         selected_source = self.source_combo.currentData()
         selected_target = self.target_combo.currentData()
+        selected_capture = self.capture_screen_combo.currentData()
         self.source_combo.clear()
         self.target_combo.clear()
+        self.capture_screen_combo.clear()
         for screen in self.session.project.screens:
             self.source_combo.addItem(screen.name, screen.id)
             self.target_combo.addItem(screen.name, screen.id)
+            self.capture_screen_combo.addItem(screen.name, screen.id)
         self._restore_combo(self.source_combo, selected_source)
         self._restore_combo(self.target_combo, selected_target)
+        self._restore_combo(
+            self.capture_screen_combo,
+            selected_capture or self.session.active_screen_id,
+        )
         self.connection_list.clear()
         self.update_relation_button.setEnabled(True)
         self.delete_relation_button.setEnabled(True)
@@ -2454,6 +2610,7 @@ class ScreenFlowWidget(QWidget):
             selected_connection_id = None
             self.graph.selected_connection_id = None
         self._update_simulator()
+        self._update_live_target_defaults()
         self.graph.update()
         self._updating = False
         if selected_connection_id:
@@ -2676,6 +2833,161 @@ class ScreenFlowWidget(QWidget):
                 changed = True
         if changed:
             self.session.mark_changed()
+
+    def shutdown_live_simulator(self) -> None:
+        """Stop the embedded simulator before its parent window closes."""
+        self.live_controller.shutdown()
+
+    def _update_preview_mode(self) -> None:
+        """Show the designer preview, live view, or both side by side."""
+        mode = str(self.preview_mode_combo.currentData())
+        self.preview.setVisible(mode in {"designer", "compare"})
+        self.live_preview.setVisible(mode in {"live", "compare"})
+        if mode == "designer":
+            self.live_status_label.setText("Designer preview active.")
+        elif not self.live_controller.is_running():
+            self.live_status_label.setText(
+                "Start the simulator to render the actual Picoware framebuffer."
+            )
+
+    def _live_target_kind_changed(self, kind: str) -> None:
+        """Enable a launch target only for non-desktop simulator routes."""
+        self.live_target_edit.setEnabled(kind != "Desktop")
+
+    def _update_live_target_defaults(self) -> None:
+        """Infer a simulator route when a new imported application is loaded."""
+        import_root = self.session.project.import_root
+        if import_root == self._live_import_root:
+            return
+        self._live_import_root = import_root
+        kind, name = self._infer_live_target(import_root)
+        self.live_target_kind_combo.setCurrentText(kind)
+        self.live_target_edit.setText(name)
+
+    def _infer_live_target(self, import_root: str) -> tuple[str, str]:
+        """Infer the closest simulator launch route from an import path."""
+        if not import_root:
+            return "Desktop", ""
+        root = Path(import_root)
+        parts = list(root.parts)
+        game_index = next(
+            (index for index, part in enumerate(parts) if part.lower() == "games"),
+            -1,
+        )
+        if game_index >= 0:
+            games_path = Path(*parts[: game_index + 1])
+            base = parts[game_index + 1] if len(parts) > game_index + 1 else root.stem
+            launcher = self._matching_launcher(games_path, base)
+            return "Game", launcher or (root.stem if root.is_file() else root.name)
+        base = root.stem if root.is_file() else root.name
+        container = root.parent
+        launcher = self._matching_launcher(container, base)
+        return "Application", launcher or base
+
+    def _matching_launcher(self, container: Path, base: str) -> str:
+        """Return a sibling Python launcher matching a file or package name."""
+        normalized = "".join(
+            character for character in base.lower() if character.isalnum()
+        )
+        try:
+            candidates = sorted(container.glob("*.py"))
+        except OSError:
+            return ""
+        for path in candidates:
+            candidate = "".join(
+                character for character in path.stem.lower() if character.isalnum()
+            )
+            if candidate == normalized:
+                return path.stem
+        return ""
+
+    def _live_apps_source(self) -> str:
+        """Return the application catalogue root used by a live launch."""
+        default = (
+            Path(__file__).resolve().parents[1]
+            / "builds"
+            / "MicroPython"
+            / "apps_unfrozen"
+        )
+        import_root = self.session.project.import_root
+        if not import_root:
+            return str(default)
+        root = Path(import_root)
+        try:
+            root.resolve().relative_to(default.resolve())
+            return str(default)
+        except (OSError, ValueError):
+            pass
+        for parent in (root, *root.parents):
+            if parent.name.lower() == "games":
+                return str(parent.parent)
+        return str(root.parent)
+
+    def _start_live_simulator(self) -> None:
+        """Start an isolated simulator for the selected route and board."""
+        kind = self.live_target_kind_combo.currentText()
+        target = self.live_target_edit.text().strip()
+        if kind != "Desktop" and not target:
+            QMessageBox.information(
+                self,
+                "Simulator target required",
+                "Enter the application, game, or Library route name.",
+            )
+            return
+        config = LiveSimulatorConfig(
+            target_kind=kind,
+            target_name=target,
+            board=self.live_board_combo.currentText(),
+            apps_source=self._live_apps_source(),
+            watch_path=self.session.project.import_root,
+            auto_reload=self.live_auto_reload_check.isChecked(),
+        )
+        self.live_controller.start(config)
+        if self.preview_mode_combo.currentData() == "designer":
+            self.preview_mode_combo.setCurrentIndex(
+                self.preview_mode_combo.findData("live")
+            )
+
+    def _capture_live_frame(self) -> None:
+        """Associate the current live framebuffer with a designer screen."""
+        image = self.live_controller.current_frame()
+        screen_id = str(self.capture_screen_combo.currentData() or "")
+        if image.isNull() or not screen_id:
+            QMessageBox.information(
+                self,
+                "No live frame",
+                "Start the simulator and wait for a frame before capturing it.",
+            )
+            return
+        self.session.set_live_screen_image(screen_id, image)
+        screen = self.session.project.screen(screen_id)
+        name = screen.name if screen is not None else "screen"
+        self.live_status_label.setText(f"Captured live framebuffer for {name}.")
+
+    def _clear_live_capture(self) -> None:
+        """Clear the selected screen's transient live framebuffer capture."""
+        screen_id = str(self.capture_screen_combo.currentData() or "")
+        if screen_id:
+            self.session.clear_live_screen_image(screen_id)
+
+    def _live_status_changed(self, status: str) -> None:
+        """Display current simulator status and runtime details."""
+        self.live_status_label.setStyleSheet("")
+        self.live_status_label.setText(status)
+
+    def _live_error_changed(self, error: str) -> None:
+        """Display an isolated simulator failure without hiding the fallback."""
+        self.live_status_label.setStyleSheet("color: #d32f2f;")
+        self.live_status_label.setText(error)
+        self.preview_mode_combo.setCurrentIndex(
+            self.preview_mode_combo.findData("compare")
+        )
+
+    def _live_running_changed(self, running: bool) -> None:
+        """Update live simulator controls for process lifecycle changes."""
+        self.start_live_button.setEnabled(not running)
+        self.restart_live_button.setEnabled(running)
+        self.stop_live_button.setEnabled(running)
 
     def _send_simulator_event(self) -> None:
         """Send one event through the navigation graph."""

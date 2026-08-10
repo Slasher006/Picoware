@@ -69,6 +69,7 @@ def _parse_args(argv):
     opts = {
         "headless": True,
         "viewer": False,
+        "bridge": "",
         "frames": 0,
         "exit_after_frames": 0,
         "scale": 2,
@@ -106,6 +107,10 @@ def _parse_args(argv):
             opts["headless"] = True
         elif arg == "--viewer":
             opts["viewer"] = True
+            opts["headless"] = True
+        elif arg == "--bridge" and i + 1 < len(argv):
+            i += 1
+            opts["bridge"] = _abspath(argv[i])
             opts["headless"] = True
         elif arg == "--sdl":
             opts["headless"] = False
@@ -191,7 +196,9 @@ def _parse_args(argv):
             i += 1
             opts["record"] = _abspath(argv[i])
         elif arg == "--help":
-            print("usage: micropython simulator/run.py [--viewer] [--sdl] [--headless] [--frames N] [--exit-after-frames N] [--speed auto|real|pico2w|fast|unlimited] [--fps N] [--network real|offline] [--bluetooth virtual|off] [--audio real|silent] [--keys a,b] [--keys-text TEXT] [--record FILE] [--open NAME] [--app NAME] [--game NAME] [--apps-source PATH] [--reset-sd] [--sd-profile clean|dev|media|network-fixtures] [--screenshot PATH] [--coverage apps|games|all] [--script FILE] [--wait-view NAME] [--assert-text TEXT] [--capabilities] [--sim-check]")
+            print(
+                "usage: micropython simulator/run.py [--viewer] [--bridge PATH] [--sdl] [--headless] [--frames N] [--exit-after-frames N] [--speed auto|real|pico2w|fast|unlimited] [--fps N] [--network real|offline] [--bluetooth virtual|off] [--audio real|silent] [--keys a,b] [--keys-text TEXT] [--record FILE] [--open NAME] [--app NAME] [--game NAME] [--apps-source PATH] [--reset-sd] [--sd-profile clean|dev|media|network-fixtures] [--screenshot PATH] [--coverage apps|games|all] [--script FILE] [--wait-view NAME] [--assert-text TEXT] [--capabilities] [--sim-check]"
+            )
             raise SystemExit
         else:
             print("Unknown argument:", arg)
@@ -548,6 +555,7 @@ def _run_sim_check(opts):
     _run_library_route_check()
     _run_stale_app_link_check(opts)
     _run_duplicate_app_link_check(opts)
+    bridge_path = opts["sd"] + "/sim-editor-bridge-check"
     commands = (
         "sh "
         + _quote(THIS_DIR + "/build.sh")
@@ -555,6 +563,14 @@ def _run_sim_check(opts):
         "micropython "
         + _quote(THIS_DIR + "/run.py")
         + " --headless --frames 30 --wait-view desktop_view --audio silent --network offline --sd "
+        + _quote(opts["sd"])
+        + " --apps-source "
+        + _quote(opts["apps_source"]),
+        "micropython "
+        + _quote(THIS_DIR + "/run.py")
+        + " --headless --bridge "
+        + _quote(bridge_path)
+        + " --exit-after-frames 2 --audio silent --network offline --sd "
         + _quote(opts["sd"])
         + " --apps-source "
         + _quote(opts["apps_source"]),
@@ -638,6 +654,7 @@ def _run_sim_check(opts):
         if status != 0:
             print("[sim-check:fail]", cmd, status)
             raise SystemExit(1)
+    _run_editor_bridge_check(bridge_path)
     _run_keyboard_background_check()
     _run_lcd_parity_check()
     _run_uart_parity_check()
@@ -655,6 +672,27 @@ def _run_sim_check(opts):
     _run_fatal_exit_check(opts)
     _run_mjs_check()
     print("[sim-check:pass]")
+
+
+def _run_editor_bridge_check(path):
+    """Verify the editor bridge publishes framebuffer metadata and status."""
+    frame = path + "/sim_frame.rgb565"
+    expected = 320 * 320 * 2
+    try:
+        if os.stat(frame)[6] != expected:
+            raise RuntimeError("simulator editor bridge framebuffer size mismatch")
+        with open(frame + ".meta", "r") as handle:
+            metadata = handle.read()
+        if "width=320\n" not in metadata or "height=320\n" not in metadata:
+            raise RuntimeError("simulator editor bridge metadata mismatch")
+        with open(frame + ".status", "r") as handle:
+            status = handle.read()
+        if "Picoware Simulator" not in status or "View:" not in status:
+            raise RuntimeError("simulator editor bridge status missing")
+        os.stat(frame + ".stop")
+    finally:
+        _remove_tree(path)
+    print("[sim-check:ok] editor bridge framebuffer protocol")
 
 
 def _run_library_route_check():
@@ -1531,6 +1569,36 @@ def _start_viewer(opts):
     return frame, keys
 
 
+def _start_bridge(opts):
+    """Prepare headless framebuffer and input paths for an editor bridge."""
+    bridge = opts["bridge"]
+    _mkdir_p(bridge)
+    frame = bridge + "/sim_frame.rgb565"
+    keys = bridge + "/sim_keys.txt"
+    for path in (
+        keys,
+        frame,
+        frame + ".stop",
+        frame + ".quit",
+        frame + ".error",
+        frame + ".status",
+        frame + ".control",
+        frame + ".log",
+        frame + ".meta",
+    ):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    board_name = str(opts["board"]).lower().replace("_", "-")
+    width, height = _simulator_display_size(board_name)
+    with open(frame + ".meta", "w") as handle:
+        handle.write("width=" + str(width) + "\n")
+        handle.write("height=" + str(height) + "\n")
+        handle.write("board=" + board_name + "\n")
+    return frame, keys
+
+
 def main():
     """Picoware simulator entry point."""
     _insert_path(ROOT)
@@ -1562,6 +1630,8 @@ def main():
     viewer_keys = ""
     if opts["viewer"]:
         viewer_frame, viewer_keys = _start_viewer(opts)
+    elif opts["bridge"]:
+        viewer_frame, viewer_keys = _start_bridge(opts)
 
     import sim_runtime
 
@@ -1581,7 +1651,7 @@ def main():
         opts["trace_views"],
         opts["trace_imports"],
         opts["screenshot"],
-        opts["viewer"],
+        bool(opts["viewer"] or opts["bridge"]),
         viewer_frame,
         viewer_keys,
         opts["network"],
@@ -1637,9 +1707,10 @@ def main():
             sys.print_exception(e)
         except Exception:
             print("Unhandled simulator exception:", e)
-        if opts["viewer"] and viewer_frame:
+        if (opts["viewer"] or opts["bridge"]) and viewer_frame:
             _write_error_file(viewer_frame + ".error", e)
-            _wait_for_viewer_close(viewer_frame)
+            if opts["viewer"]:
+                _wait_for_viewer_close(viewer_frame)
         else:
             _write_error_file(opts["sd"] + "/sim_error.txt", e)
         raise SystemExit(1)
@@ -1652,7 +1723,7 @@ def main():
             sim_runtime.finish_recording()
         except Exception:
             pass
-        if opts["viewer"] and viewer_frame:
+        if (opts["viewer"] or opts["bridge"]) and viewer_frame:
             try:
                 with open(viewer_frame + ".stop", "w") as handle:
                     handle.write("stop\n")
