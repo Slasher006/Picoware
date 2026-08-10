@@ -35,6 +35,10 @@ class DesignerModelTests(unittest.TestCase):
         element.focus_order = 7
         element.event_name = "launch_game"
         element.enabled = False
+        element.focus_style = "corners"
+        element.focus_color = 0xF81F
+        element.focus_thickness = 3
+        element.focus_padding = 5
         project.screens[0].elements.append(element)
         second = ScreenDesign.create("Game", 320, 320, 1)
         target_element = GuiElement.create("icon", 1)
@@ -63,13 +67,17 @@ class DesignerModelTests(unittest.TestCase):
             loaded.screens[0].elements[0].activation_event(),
             "launch_game",
         )
+        self.assertEqual(loaded.screens[0].elements[0].focus_style, "corners")
+        self.assertEqual(loaded.screens[0].elements[0].focus_color, 0xF81F)
+        self.assertEqual(loaded.screens[0].elements[0].focus_thickness, 3)
+        self.assertEqual(loaded.screens[0].elements[0].focus_padding, 5)
         self.assertEqual(loaded.connections[0].trigger, "launch_game")
         self.assertEqual(loaded.connections[0].source_element_id, element.id)
         self.assertEqual(
             loaded.connections[0].target_element_id,
             target_element.id,
         )
-        self.assertEqual(loaded.format_version, 3)
+        self.assertEqual(loaded.format_version, 4)
 
     def test_generated_python_is_parseable(self) -> None:
         """Generate valid screen drawing and flow methods."""
@@ -126,6 +134,24 @@ class DesignerModelTests(unittest.TestCase):
         self.assertIn("event == 'open_details'", generated)
         self.assertIn("self.focus_index = 1", generated)
         self.assertIn("('open_details',)", generated)
+
+    def test_generated_focus_style_is_configurable(self) -> None:
+        """Generate the selected element's configured focus appearance."""
+        project = GuiProject.create("Focus Style")
+        button = GuiElement.create("button", 1)
+        button.focus_style = "underline"
+        button.focus_color = 0xF81F
+        button.focus_thickness = 3
+        button.focus_padding = 1
+        project.screens[0].elements.append(button)
+        generated = generate_python(project)
+        ast.parse(generated)
+        self.assertIn("self._draw_focus()", generated)
+        self.assertIn("def _draw_focus(self):", generated)
+        self.assertIn(
+            "self.draw._fill_rectangle(23, 61, 122, 3, 0xF81F)",
+            generated,
+        )
 
     def test_patch_replaces_managed_block(self) -> None:
         """Update one designer block without duplicating it."""

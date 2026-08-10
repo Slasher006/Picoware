@@ -82,6 +82,12 @@ from .reference import prepare_reference_image, read_image_frames
 
 ELEMENT_MIME_TYPE = "application/x-pico-gui-element"
 FLOW_ELEMENT_SEPARATOR = "::element::"
+FOCUS_STYLES = (
+    ("Outline", "outline"),
+    ("Corner brackets", "corners"),
+    ("Underline", "underline"),
+    ("Hidden", "none"),
+)
 
 
 def flow_endpoint_key(screen_id: str, element_id: str = "") -> str:
@@ -274,6 +280,7 @@ def draw_screen(
     selected_id: str | set[str] | None = None,
     reference: QImage | None = None,
     reference_opacity: float = 0.45,
+    focused_id: str | None = None,
 ) -> None:
     """Draw one designed screen into a target rectangle."""
     scale = min(target.width() / screen.width, target.height() / screen.height)
@@ -305,7 +312,12 @@ def draw_screen(
         if element.visible:
             if not element.enabled:
                 painter.setOpacity(0.45)
-            draw_element(painter, element, element.id in selected_ids)
+            draw_element(
+                painter,
+                element,
+                element.id in selected_ids,
+                element.id == focused_id,
+            )
             painter.setOpacity(1.0)
     painter.restore()
 
@@ -352,7 +364,10 @@ def draw_fitted_image(painter: QPainter, source: QImage, target: QRectF) -> None
 
 
 def draw_element(
-    painter: QPainter, element: GuiElement, selected: bool = False
+    painter: QPainter,
+    element: GuiElement,
+    selected: bool = False,
+    focused: bool = False,
 ) -> None:
     """Draw one GUI element and its selection handles."""
     rectangle = QRectF(element.x, element.y, element.width, element.height)
@@ -415,6 +430,52 @@ def draw_element(
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
             "LOCK",
         )
+    if focused:
+        draw_focus_indicator(painter, element)
+
+
+def draw_focus_indicator(painter: QPainter, element: GuiElement) -> None:
+    """Draw one configured keyboard focus indicator."""
+    style = element.focus_style
+    if style == "none":
+        return
+    color = qcolor_from_rgb565(element.focus_color)
+    thickness = max(1, min(6, element.focus_thickness))
+    padding = max(0, min(12, element.focus_padding))
+    if style == "underline":
+        painter.fillRect(
+            QRectF(
+                element.x - padding,
+                element.y + element.height + padding,
+                element.width + padding * 2,
+                thickness,
+            ),
+            color,
+        )
+        return
+    painter.setPen(QPen(color, 1))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    for offset in range(thickness):
+        pad = padding + offset
+        left = element.x - pad
+        top = element.y - pad
+        right = element.x + element.width + pad
+        bottom = element.y + element.height + pad
+        if style == "corners":
+            segment = max(3, min(10, min(element.width, element.height) // 3))
+            for start, end in (
+                (QPointF(left, top), QPointF(left + segment, top)),
+                (QPointF(left, top), QPointF(left, top + segment)),
+                (QPointF(right - segment, top), QPointF(right, top)),
+                (QPointF(right, top), QPointF(right, top + segment)),
+                (QPointF(left, bottom), QPointF(left + segment, bottom)),
+                (QPointF(left, bottom - segment), QPointF(left, bottom)),
+                (QPointF(right - segment, bottom), QPointF(right, bottom)),
+                (QPointF(right, bottom - segment), QPointF(right, bottom)),
+            ):
+                painter.drawLine(start, end)
+        else:
+            painter.drawRect(QRectF(left, top, right - left, bottom - top))
 
 
 class ElementPaletteButton(QPushButton):
@@ -1087,6 +1148,23 @@ class ScreenDesignerWidget(QWidget):
         self.focusable_check = QCheckBox("Keyboard focusable")
         self.focus_order_spin = QSpinBox()
         self.focus_order_spin.setRange(0, 999)
+        self.focus_style_combo = QComboBox()
+        for label, style in FOCUS_STYLES:
+            self.focus_style_combo.addItem(label, style)
+        self.focus_style_combo.setToolTip(
+            "Choose how keyboard focus is drawn around this element."
+        )
+        self.focus_color_button = QPushButton("Focus color...")
+        self.focus_thickness_spin = QSpinBox()
+        self.focus_thickness_spin.setRange(1, 6)
+        self.focus_thickness_spin.setToolTip(
+            "Line thickness in device pixels. Example: 2."
+        )
+        self.focus_padding_spin = QSpinBox()
+        self.focus_padding_spin.setRange(0, 12)
+        self.focus_padding_spin.setToolTip(
+            "Space between the element and indicator. Example: 2."
+        )
         self.event_name_edit = QLineEdit()
         self.event_name_edit.setPlaceholderText("Uses the element name")
         self.event_name_edit.setToolTip(
@@ -1109,6 +1187,10 @@ class ScreenDesignerWidget(QWidget):
         property_form.addRow(self.enabled_check)
         property_form.addRow(self.focusable_check)
         property_form.addRow("Focus order", self.focus_order_spin)
+        property_form.addRow("Focus style", self.focus_style_combo)
+        property_form.addRow(self.focus_color_button)
+        property_form.addRow("Focus thickness", self.focus_thickness_spin)
+        property_form.addRow("Focus spacing", self.focus_padding_spin)
         property_form.addRow("Activation event", self.event_name_edit)
         property_form.addRow("Graph connections", self.element_flow_label)
         property_form.addRow(self.fill_color_button)
@@ -1179,6 +1261,14 @@ class ScreenDesignerWidget(QWidget):
         self.enabled_check.toggled.connect(self._element_properties_changed)
         self.focusable_check.toggled.connect(self._element_properties_changed)
         self.focus_order_spin.valueChanged.connect(self._element_properties_changed)
+        self.focus_style_combo.currentIndexChanged.connect(
+            self._element_properties_changed
+        )
+        self.focus_thickness_spin.valueChanged.connect(self._element_properties_changed)
+        self.focus_padding_spin.valueChanged.connect(self._element_properties_changed)
+        self.focus_color_button.clicked.connect(
+            lambda: self._choose_element_color("focus_color")
+        )
         self.fill_color_button.clicked.connect(
             lambda: self._choose_element_color("fill_color")
         )
@@ -1758,6 +1848,15 @@ class ScreenDesignerWidget(QWidget):
         self.focusable_check.setChecked(element.focusable)
         self.focus_order_spin.setValue(element.focus_order)
         self.focus_order_spin.setEnabled(element.focusable)
+        focus_style_index = self.focus_style_combo.findData(element.focus_style)
+        self.focus_style_combo.setCurrentIndex(max(0, focus_style_index))
+        self.focus_style_combo.setEnabled(element.focusable)
+        self.focus_thickness_spin.setValue(element.focus_thickness)
+        self.focus_padding_spin.setValue(element.focus_padding)
+        focus_visible = element.focusable and element.focus_style != "none"
+        self.focus_color_button.setEnabled(focus_visible)
+        self.focus_thickness_spin.setEnabled(focus_visible)
+        self.focus_padding_spin.setEnabled(focus_visible)
         self.event_name_edit.setText(element.event_name)
         connection_count = sum(
             connection.source_element_id == element.id
@@ -1863,6 +1962,9 @@ class ScreenDesignerWidget(QWidget):
         element.enabled = self.enabled_check.isChecked()
         element.focusable = self.focusable_check.isChecked()
         element.focus_order = self.focus_order_spin.value()
+        element.focus_style = str(self.focus_style_combo.currentData() or "outline")
+        element.focus_thickness = self.focus_thickness_spin.value()
+        element.focus_padding = self.focus_padding_spin.value()
         element.event_name = self.event_name_edit.text().strip()
         new_event = element.activation_event()
         if new_event != old_event:
@@ -1905,6 +2007,7 @@ class ScreenDesignerWidget(QWidget):
             (self.fill_color_button, element.fill_color),
             (self.border_color_button, element.border_color),
             (self.text_color_button, element.text_color),
+            (self.focus_color_button, element.focus_color),
         ):
             button.setStyleSheet(f"background: {qcolor_from_rgb565(color).name()};")
 
@@ -1960,7 +2063,7 @@ class GuiPreview(QWidget):
                 painter,
                 screen,
                 self._screen_target(screen),
-                self.focused_element_id,
+                focused_id=self.focused_element_id,
             )
         painter.end()
 

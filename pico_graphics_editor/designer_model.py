@@ -72,6 +72,10 @@ class GuiElement:
     focus_order: int = 0
     enabled: bool = True
     event_name: str = ""
+    focus_style: str = "outline"
+    focus_color: int = 0xFFE0
+    focus_thickness: int = 2
+    focus_padding: int = 2
 
     @classmethod
     def create(cls, kind: str, index: int) -> GuiElement:
@@ -206,7 +210,7 @@ class GuiProject:
     screens: list[ScreenDesign]
     connections: list[FlowConnection] = field(default_factory=list)
     start_screen_id: str = ""
-    format_version: int = 3
+    format_version: int = 4
     import_root: str = ""
     imported_sources: dict[str, str] = field(default_factory=dict)
 
@@ -234,7 +238,7 @@ class GuiProject:
             screens,
             connections,
             str(values.get("start_screen_id", "")),
-            max(3, int(values.get("format_version", 1))),
+            max(4, int(values.get("format_version", 1))),
             str(values.get("import_root", "")),
             {
                 str(path): str(digest)
@@ -340,6 +344,7 @@ def generate_python(project: GuiProject) -> str:
         )
     if not project.screens:
         lines.append("        pass\n")
+    lines.append("        self._draw_focus()\n")
     lines.extend(
         [
             "\n",
@@ -421,6 +426,33 @@ def generate_python(project: GuiProject) -> str:
         lines.append(f"        {keyword} self.screen == {screen.name!r}:\n")
         lines.append(f"            return {names!r}\n")
     lines.append("        return ()\n")
+    lines.extend(
+        [
+            "\n",
+            "    def _draw_focus(self):\n",
+            '        """Draw the configured active-element focus indicator."""\n',
+        ]
+    )
+    if not project.screens:
+        lines.append("        return\n")
+    for screen_index, screen in enumerate(project.screens):
+        keyword = "if" if screen_index == 0 else "elif"
+        focusable = [
+            (element.focus_order, element_index, element)
+            for element_index, element in enumerate(screen.elements)
+            if element.visible and element.enabled and element.focusable
+        ]
+        ordered = [item[2] for item in sorted(focusable)]
+        lines.append(f"        {keyword} self.screen == {screen.name!r}:\n")
+        if not ordered:
+            lines.append("            return\n")
+            continue
+        lines.append(f"            focus_index = self.focus_index % {len(ordered)}\n")
+        for focus_index, element in enumerate(ordered):
+            focus_keyword = "if" if focus_index == 0 else "elif"
+            lines.append(f"            {focus_keyword} focus_index == {focus_index}:\n")
+            lines.extend(_focus_indicator_python(element, "                "))
+            lines.append("                return\n")
     for screen in project.screens:
         lines.extend(_screen_python(screen))
     lines.append("# Pico GUI Designer end\n")
@@ -578,6 +610,62 @@ def _element_python(element: GuiElement) -> list[str]:
             f"{prefix}self.draw._fill_rectangle({element.x}, {element.y}, {progress_width}, {element.height}, {border})\n"
         )
     return lines
+
+
+def _focus_indicator_python(element: GuiElement, prefix: str) -> list[str]:
+    """Generate drawing calls for one element focus indicator."""
+    style = (
+        element.focus_style
+        if element.focus_style
+        in {
+            "outline",
+            "corners",
+            "underline",
+            "none",
+        }
+        else "outline"
+    )
+    if style == "none":
+        return []
+    color = f"0x{element.focus_color:04X}"
+    thickness = max(1, min(6, int(element.focus_thickness)))
+    padding = max(0, min(12, int(element.focus_padding)))
+    if style == "underline":
+        return [
+            f"{prefix}self.draw._fill_rectangle("
+            f"{element.x - padding}, {element.y + element.height + padding}, "
+            f"{element.width + padding * 2}, {thickness}, {color})\n"
+        ]
+    if style == "corners":
+        segment = max(3, min(10, min(element.width, element.height) // 3))
+        lines: list[str] = []
+        for offset in range(thickness):
+            pad = padding + offset
+            left = element.x - pad
+            top = element.y - pad
+            right = element.x + element.width + pad
+            bottom = element.y + element.height + pad
+            for x1, y1, x2, y2 in (
+                (left, top, left + segment, top),
+                (left, top, left, top + segment),
+                (right - segment, top, right, top),
+                (right, top, right, top + segment),
+                (left, bottom, left + segment, bottom),
+                (left, bottom - segment, left, bottom),
+                (right - segment, bottom, right, bottom),
+                (right, bottom - segment, right, bottom),
+            ):
+                lines.append(
+                    f"{prefix}self.draw._line({x1}, {y1}, {x2}, {y2}, {color})\n"
+                )
+        return lines
+    return [
+        f"{prefix}self.draw._rectangle("
+        f"{element.x - padding - offset}, {element.y - padding - offset}, "
+        f"{element.width + (padding + offset) * 2}, "
+        f"{element.height + (padding + offset) * 2}, {color})\n"
+        for offset in range(thickness)
+    ]
 
 
 def _replace_designer_block(source: str, generated: str) -> str:

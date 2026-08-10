@@ -211,6 +211,10 @@ class LiveSimulatorTests(unittest.TestCase):
         active.background_color = 0xF800
         button = GuiElement.create("button", 1)
         button.name = "next"
+        button.focus_style = "underline"
+        button.focus_color = 0xFFFF
+        button.focus_thickness = 3
+        button.focus_padding = 1
         active.elements.append(button)
         destination = ScreenDesign.create("Destination", 320, 320, 2)
         destination.background_color = 0x07E0
@@ -218,6 +222,8 @@ class LiveSimulatorTests(unittest.TestCase):
         first_destination.name = "unused"
         finish_button = GuiElement.create("button", 2)
         finish_button.name = "finish"
+        finish_button.focus_style = "corners"
+        finish_button.focus_color = 0xF81F
         destination.elements.extend((first_destination, finish_button))
         finished = ScreenDesign.create("Finished", 320, 320, 3)
         finished.background_color = 0x001F
@@ -265,6 +271,10 @@ class LiveSimulatorTests(unittest.TestCase):
             self.assertFalse(image.isNull())
             self.assertGreater(image.pixelColor(160, 160).red(), 240)
             self.assertLess(image.pixelColor(160, 160).green(), 20)
+            initial_focus = image.pixelColor(24, 62)
+            self.assertGreater(initial_focus.red(), 240)
+            self.assertGreater(initial_focus.green(), 240)
+            self.assertGreater(initial_focus.blue(), 240)
             controller.send_key(13, True)
             controller.send_key(13, False)
             for unused in range(80):
@@ -274,6 +284,10 @@ class LiveSimulatorTests(unittest.TestCase):
                 QTest.qWait(50)
             self.assertGreater(image.pixelColor(160, 160).green(), 240)
             self.assertLess(image.pixelColor(160, 160).red(), 20)
+            target_focus = image.pixelColor(30, 30)
+            self.assertGreater(target_focus.red(), 240)
+            self.assertLess(target_focus.green(), 20)
+            self.assertGreater(target_focus.blue(), 240)
             controller.send_key(13, True)
             controller.send_key(13, False)
             for unused in range(80):

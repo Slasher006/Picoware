@@ -221,6 +221,30 @@ class DesignerUiTests(unittest.TestCase):
         self.assertIn("1 connected relation", widget.element_flow_label.text())
         widget.close()
 
+    def test_element_focus_appearance_is_configurable(self) -> None:
+        """Edit the style and geometry of an element focus indicator."""
+        session = DesignerSession()
+        button = GuiElement.create("button", 1)
+        session.current_screen().elements.append(button)
+        widget = ScreenDesignerWidget(session)
+        widget._select_element(button.id)
+        widget.focus_style_combo.setCurrentIndex(
+            widget.focus_style_combo.findData("corners")
+        )
+        widget.focus_thickness_spin.setValue(4)
+        widget.focus_padding_spin.setValue(6)
+        widget._element_properties_changed()
+        self.assertEqual(button.focus_style, "corners")
+        self.assertEqual(button.focus_thickness, 4)
+        self.assertEqual(button.focus_padding, 6)
+        self.assertTrue(widget.focus_color_button.isEnabled())
+        widget.focus_style_combo.setCurrentIndex(
+            widget.focus_style_combo.findData("none")
+        )
+        widget._element_properties_changed()
+        self.assertFalse(widget.focus_color_button.isEnabled())
+        widget.close()
+
     def test_deleting_element_removes_its_asset_relations(self) -> None:
         """Remove graph relations that reference a deleted design element."""
         project = GuiProject.create("Delete Asset")
