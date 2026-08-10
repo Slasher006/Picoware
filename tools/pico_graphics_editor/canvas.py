@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
@@ -31,6 +31,7 @@ class PixelCanvas(QWidget):
         self._start: tuple[int, int] | None = None
         self._last: tuple[int, int] | None = None
         self._gesture_base: PixelArt | None = None
+        self._display_cache: QImage | None = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._update_size()
@@ -45,6 +46,7 @@ class PixelCanvas(QWidget):
         self._undo.clear()
         self._redo.clear()
         self._gesture_base = None
+        self._display_cache = None
         self._update_size()
         self.update()
         self.document_changed.emit()
@@ -90,6 +92,7 @@ class PixelCanvas(QWidget):
             return
         self._redo.append(self._art.copy())
         self._art = self._undo.pop()
+        self._display_cache = None
         self.update()
         self.document_changed.emit()
 
@@ -99,6 +102,7 @@ class PixelCanvas(QWidget):
             return
         self._undo.append(self._art.copy())
         self._art = self._redo.pop()
+        self._display_cache = None
         self.update()
         self.document_changed.emit()
 
@@ -111,15 +115,16 @@ class PixelCanvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
         cell = self._zoom
-        for y in range(self._art.height):
-            for x in range(self._art.width):
-                color = self._art.pixel(x, y)
-                if color is None:
-                    shade = 0xD0 if (x + y) & 1 else 0xB8
-                    qt_color = QColor(shade, shade, shade)
-                else:
-                    qt_color = qcolor_from_rgb565(color)
-                painter.fillRect(x * cell, y * cell, cell, cell, qt_color)
+        if self._display_cache is None:
+            self._display_cache = pixel_art_image(
+                self._art,
+                transparent=False,
+                checker=True,
+            )
+        painter.drawImage(
+            QRect(0, 0, self._art.width * cell, self._art.height * cell),
+            self._display_cache,
+        )
         if self._show_grid and cell >= 6:
             painter.setPen(QPen(QColor(0, 0, 0, 55), 1))
             for x in range(self._art.width + 1):
@@ -148,9 +153,11 @@ class PixelCanvas(QWidget):
         self._gesture_base = self._art.copy()
         if self._tool == "fill":
             self._art.flood_fill(x, y, self._color)
+            self._display_cache = None
             self._finish_gesture()
         elif self._tool in {"pencil", "eraser"}:
             self._art.set_pixel(x, y, self._paint_color())
+            self._display_cache = None
             self.update()
             self.document_changed.emit()
 
@@ -182,6 +189,7 @@ class PixelCanvas(QWidget):
                 self._art.draw_rectangle(
                     left, top, right - left + 1, bottom - top + 1, self._color
                 )
+        self._display_cache = None
         self.update()
         self.document_changed.emit()
 
@@ -238,13 +246,20 @@ def qcolor_from_rgb565(color: int) -> QColor:
     return QColor(red, green, blue)
 
 
-def pixel_art_image(art: PixelArt, transparent: bool = True) -> QImage:
+def pixel_art_image(
+    art: PixelArt,
+    transparent: bool = True,
+    checker: bool = False,
+) -> QImage:
     """Convert pixel art into an unscaled Qt image."""
     image = QImage(art.width, art.height, QImage.Format.Format_ARGB32)
     for y in range(art.height):
         for x in range(art.width):
             color = art.pixel(x, y)
-            if color is None and transparent:
+            if color is None and checker:
+                shade = 0xD0 if (x + y) & 1 else 0xB8
+                image.setPixelColor(x, y, QColor(shade, shade, shade))
+            elif color is None and transparent:
                 image.setPixelColor(x, y, QColor(0, 0, 0, 0))
             elif color is None:
                 image.setPixelColor(x, y, QColor(0, 0, 0))

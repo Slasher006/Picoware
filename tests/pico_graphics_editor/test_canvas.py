@@ -59,6 +59,12 @@ class CanvasTests(unittest.TestCase):
         image = pixel_art_image(self.canvas.art())
         self.assertEqual(image.pixelColor(0, 0).alpha(), 0)
 
+    def test_checker_image_is_opaque(self) -> None:
+        """Render transparent pixels as alternating canvas shades."""
+        image = pixel_art_image(self.canvas.art(), transparent=False, checker=True)
+        self.assertEqual(image.pixelColor(0, 0).alpha(), 255)
+        self.assertNotEqual(image.pixelColor(0, 0), image.pixelColor(1, 0))
+
 
 if __name__ == "__main__":
     unittest.main()

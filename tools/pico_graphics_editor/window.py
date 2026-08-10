@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSize, Qt, QStandardPaths
+from PySide6.QtCore import QSize, Qt, QStandardPaths, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -99,6 +99,8 @@ class MainWindow(QMainWindow):
         self._suppress_changes = False
         self._current_color = 0xFFFF
         self._background_color = 0x0000
+        self._thumbnail_generation = 0
+        self._thumbnail_queue: list[int] = []
         self._build_actions()
         self._build_interface()
         self._connect_actions()
@@ -384,6 +386,9 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         self.assets = assets
+        self._thumbnail_generation += 1
+        generation = self._thumbnail_generation
+        self._thumbnail_queue = list(range(len(assets)))
         self.current_asset = None
         self.current_trace = None
         self._dirty = False
@@ -395,6 +400,28 @@ class MainWindow(QMainWindow):
             item.setToolTip(
                 f"{asset.record.qualified_name}\n{asset.document.path}:{asset.record.node.lineno}"
             )
+            self.asset_list.addItem(item)
+        self.asset_count_label.setText(f"{len(assets)} graphics found")
+        self.statusBar().showMessage(f"Found {len(assets)} graphics in {path}")
+        if assets:
+            self.asset_list.setCurrentRow(0)
+            QTimer.singleShot(
+                0,
+                lambda current_generation=generation: self._render_next_thumbnail(
+                    current_generation
+                ),
+            )
+        else:
+            self._clear_editor()
+
+    def _render_next_thumbnail(self, generation: int) -> None:
+        """Render one catalogue thumbnail without blocking the UI."""
+        if generation != self._thumbnail_generation or not self._thumbnail_queue:
+            return
+        index = self._thumbnail_queue.pop(0)
+        if index < len(self.assets) and index < self.asset_list.count():
+            asset = self.assets[index]
+            item = self.asset_list.item(index)
             try:
                 trace = self.thumbnail_tracer.render(asset)
                 image = pixel_art_image(trace.current_art, False)
@@ -407,15 +434,8 @@ class MainWindow(QMainWindow):
                 item.setIcon(QIcon(pixmap))
             except Exception:
                 pass
-            self.asset_list.addItem(item)
-            if index % 20 == 0:
-                QApplication.processEvents()
-        self.asset_count_label.setText(f"{len(assets)} graphics found")
-        self.statusBar().showMessage(f"Found {len(assets)} graphics in {path}")
-        if assets:
-            self.asset_list.setCurrentRow(0)
-        else:
-            self._clear_editor()
+        if self._thumbnail_queue:
+            QTimer.singleShot(0, lambda: self._render_next_thumbnail(generation))
 
     def _rescan(self) -> None:
         """Rescan the last opened source path."""
@@ -449,8 +469,21 @@ class MainWindow(QMainWindow):
         if not isinstance(index, int) or index >= len(self.assets):
             return
         if self._dirty and not self._confirm_discard():
+            self._restore_asset_selection()
             return
         self._load_asset(self.assets[index])
+
+    def _restore_asset_selection(self) -> None:
+        """Restore the catalogue row for the active asset."""
+        if self.current_asset is None:
+            return
+        try:
+            index = self.assets.index(self.current_asset)
+        except ValueError:
+            return
+        self.asset_list.blockSignals(True)
+        self.asset_list.setCurrentRow(index)
+        self.asset_list.blockSignals(False)
 
     def _load_asset(self, asset: GraphicsAsset) -> None:
         """Render one asset and populate its controls."""
@@ -488,6 +521,12 @@ class MainWindow(QMainWindow):
     def _variant_changed(self) -> None:
         """Render the newly selected parameter variant."""
         if self._dirty and not self._confirm_discard():
+            for name, combo in self.variant_controls.items():
+                combo.blockSignals(True)
+                combo.setCurrentIndex(
+                    max(0, combo.findData(self.variant_values.get(name)))
+                )
+                combo.blockSignals(False)
             return
         for name, combo in self.variant_controls.items():
             self.variant_values[name] = combo.currentData()

@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 TOOLS_PATH = Path(__file__).resolve().parents[2] / "tools"
+REPOSITORY_PATH = Path(__file__).resolve().parents[2]
 if str(TOOLS_PATH) not in sys.path:
     sys.path.insert(0, str(TOOLS_PATH))
 
@@ -123,6 +124,21 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(second_patch.updated.count("begin"), 1)
         self.assertIn("0xF800", second_patch.updated)
         self.assertIn("0x07E0", second_patch.updated)
+
+    def test_current_pico_bomber_renderer_is_supported(self) -> None:
+        """Discover and trace representative repository graphics."""
+        renderer = (
+            REPOSITORY_PATH
+            / "builds/MicroPython/apps_unfrozen/games/pico_bomber/render.py"
+        )
+        assets = self.scanner.scan_file(renderer)
+        names = {asset.record.name for asset in assets}
+        self.assertIn("_draw_solid", names)
+        self.assertIn("_draw_player", names)
+        solid = next(asset for asset in assets if asset.record.name == "_draw_solid")
+        self.assertEqual(solid.variants["theme"], list(range(8)))
+        trace = self.tracer.render(solid, {"theme": 0})
+        self.assertGreaterEqual(len(trace.primitives), 4)
 
 
 if __name__ == "__main__":

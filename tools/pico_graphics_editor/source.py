@@ -1201,7 +1201,7 @@ def build_overlay_lines(
     call_indent = indent
     if conditions:
         lines.append(f"{indent}if {' and '.join(conditions)}:\n")
-        call_indent += "    "
+        call_indent += "\t" if "\t" in indent else "    "
     use_wrapper = any(
         record.class_name == asset.record.class_name and record.name == "_fill"
         for record in asset.document.functions.values()
