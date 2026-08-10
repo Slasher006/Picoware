@@ -420,6 +420,8 @@ class MainWindow(QMainWindow):
         self.clear_reference_action = QAction("Clear Reference Image", self)
         self.import_frames_action = QAction("Import Animation Frames...", self)
         self.new_graphic_action = QAction("Create New Python Graphic...", self)
+        self.new_graphic_action.setIconText("New Asset")
+        self.new_graphic_action.setToolTip("Create a new editable Python pixel asset.")
         self.new_gui_action = QAction("New GUI Project", self)
         self.open_gui_action = QAction("Open GUI Project...", self)
         self.save_gui_action = QAction("Save GUI Project", self)
@@ -473,6 +475,8 @@ class MainWindow(QMainWindow):
         self.tool_bar = QToolBar("Pixel tools")
         self.tool_bar.setMovable(False)
         self.addToolBar(self.tool_bar)
+        self.tool_bar.addAction(self.new_graphic_action)
+        self.tool_bar.addSeparator()
         self.tool_group = QActionGroup(self)
         self.tool_group.setExclusive(True)
         tool_specs = (

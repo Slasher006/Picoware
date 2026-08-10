@@ -84,6 +84,16 @@ class WindowTests(unittest.TestCase):
         self.assertTrue(self.window.import_existing_app_action.isEnabled())
         self.assertFalse(self.window.apply_imported_app_action.isEnabled())
 
+    def test_pixel_toolbar_exposes_new_asset_action(self) -> None:
+        """Show the pixel asset creation action in the Pixel Art toolbar."""
+        self.assertIn(self.window.new_graphic_action, self.window.tool_bar.actions())
+        button = self.window.tool_bar.widgetForAction(self.window.new_graphic_action)
+        self.assertEqual(button.text(), "New Asset")
+        self.window.workspace_tabs.setCurrentIndex(1)
+        self.assertTrue(self.window.tool_bar.isHidden())
+        self.window.workspace_tabs.setCurrentIndex(0)
+        self.assertFalse(self.window.tool_bar.isHidden())
+
     def test_apply_buttons_accept_source_review_dialogs(self) -> None:
         """Close source review dialogs when their Apply buttons are clicked."""
         source_patch = SourcePatch(
