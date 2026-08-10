@@ -14,8 +14,8 @@ REPOSITORY_PATH = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_PATH) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_PATH))
 
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtCore import QEvent, QPoint, Qt
+from PySide6.QtGui import QColor, QFocusEvent, QImage, QKeyEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -31,6 +31,8 @@ from pico_graphics_editor.live_simulator import (
     rgb565_frame_image,
 )
 from pico_graphics_editor.designer_model import (
+    FlowConnection,
+    GuiElement,
     GuiProject,
     ScreenDesign,
     generate_live_app_python,
@@ -70,12 +72,43 @@ class LiveSimulatorTests(unittest.TestCase):
         view.touch_event.connect(lambda *values: touches.append(values))
         QTest.keyPress(view, Qt.Key.Key_Up)
         QTest.keyRelease(view, Qt.Key.Key_Up)
+        QTest.keyPress(view, Qt.Key.Key_F10)
+        QTest.keyRelease(view, Qt.Key.Key_F10)
+        QTest.keyPress(view, Qt.Key.Key_Tab)
+        QTest.keyRelease(view, Qt.Key.Key_Tab)
         QTest.mousePress(view, Qt.MouseButton.LeftButton, pos=QPoint(120, 120))
         QTest.mouseRelease(view, Qt.MouseButton.LeftButton, pos=QPoint(120, 120))
-        self.assertEqual(keys, [(0xB5, True, False), (0xB5, False, False)])
+        self.assertEqual(
+            keys,
+            [
+                (0xB5, True, False),
+                (0xB5, False, False),
+                (0x90, True, False),
+                (0x90, False, False),
+                (9, True, False),
+                (9, False, False),
+            ],
+        )
         self.assertEqual(touches[-1], (0, 0, 0))
         self.assertGreaterEqual(touches[0][0], 0)
         self.assertGreaterEqual(touches[0][1], 0)
+        view.close()
+
+    def test_live_view_reserves_and_releases_picoware_keys(self) -> None:
+        """Keep simulator shortcuts local and release held keys on focus loss."""
+        view = LiveSimulatorView()
+        keys: list[tuple[int, bool, bool]] = []
+        view.key_event.connect(lambda *values: keys.append(values))
+        shortcut = QKeyEvent(
+            QEvent.Type.ShortcutOverride,
+            Qt.Key.Key_F5,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        self.application.sendEvent(view, shortcut)
+        self.assertTrue(shortcut.isAccepted())
+        QTest.keyPress(view, Qt.Key.Key_Right)
+        view.focusOutEvent(QFocusEvent(QEvent.Type.FocusOut))
+        self.assertEqual(keys, [(0xB7, True, False), (0xB7, False, False)])
         view.close()
 
     def test_imported_game_infers_live_launch_target(self) -> None:
@@ -136,6 +169,19 @@ class LiveSimulatorTests(unittest.TestCase):
         widget.shutdown_live_simulator()
         widget.close()
 
+    def test_running_live_preview_receives_keyboard_focus(self) -> None:
+        """Move keyboard focus into the framebuffer when live mode starts."""
+        widget = ScreenFlowWidget(DesignerSession())
+        focus_reasons: list[Qt.FocusReason] = []
+        widget.live_preview.setFocus = focus_reasons.append
+        widget.preview_mode_combo.setCurrentIndex(
+            widget.preview_mode_combo.findData("live")
+        )
+        widget._live_running_changed(True)
+        self.assertEqual(focus_reasons, [Qt.FocusReason.OtherFocusReason])
+        widget.shutdown_live_simulator()
+        widget.close()
+
     def test_controller_launches_headless_bridge(self) -> None:
         """Launch the real simulator and receive its first live framebuffer."""
         controller = LiveSimulatorController()
@@ -163,7 +209,16 @@ class LiveSimulatorTests(unittest.TestCase):
         project = GuiProject.create("Live Test")
         active = ScreenDesign.create("Active", 320, 320, 1)
         active.background_color = 0xF800
+        button = GuiElement.create("button", 1)
+        button.name = "next"
+        active.elements.append(button)
+        destination = ScreenDesign.create("Destination", 320, 320, 2)
+        destination.background_color = 0x07E0
         project.screens.append(active)
+        project.screens.append(destination)
+        project.connections.append(
+            FlowConnection.create(active.id, destination.id, "next")
+        )
         source = generate_live_app_python(project, active.id)
         controller = LiveSimulatorController()
         statuses: list[str] = []
@@ -188,6 +243,15 @@ class LiveSimulatorTests(unittest.TestCase):
             self.assertFalse(image.isNull())
             self.assertGreater(image.pixelColor(160, 160).red(), 240)
             self.assertLess(image.pixelColor(160, 160).green(), 20)
+            controller.send_key(13, True)
+            controller.send_key(13, False)
+            for unused in range(80):
+                image = controller.current_frame()
+                if image.pixelColor(160, 160).green() > 240:
+                    break
+                QTest.qWait(50)
+            self.assertGreater(image.pixelColor(160, 160).green(), 240)
+            self.assertLess(image.pixelColor(160, 160).red(), 20)
         finally:
             controller.shutdown()
 

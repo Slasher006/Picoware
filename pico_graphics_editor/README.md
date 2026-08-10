@@ -119,7 +119,7 @@ The Screen Flow preview supports **Designer**, **Live simulator**, and **Compare
 
 For imported applications, the editor infers an Application or Game route from the imported path. The launch type, target name, and board remain editable, so external or unusual projects can be configured manually. Start, stop, or restart the child process from the preview toolbar. When **Reload on source changes** is enabled, saved Python changes restart the simulator automatically.
 
-Click the live framebuffer and use the keyboard to interact with it. Arrow keys, Enter, Escape, function keys, printable text, and touch/mouse input are forwarded through the simulator's normal input protocol. Network access is offline and audio is silent for predictable editor sessions.
+The live framebuffer receives keyboard focus automatically when the simulator starts. Click it to return focus after using another editor control; a cyan frame shows that Picoware input is active. Arrow keys, Enter, Escape, Tab, function keys, printable text, and touch/mouse input are forwarded through the simulator's normal input protocol. Network access is offline and audio is silent for predictable editor sessions.
 
 Use **Capture live frame for screen** to associate the current real framebuffer with a selected designer screen. The captured frame appears in that screen's list thumbnail and graph node until it is cleared or another GUI project is opened. Captures are intentionally transient and are not written into application source or the `*.picogui.json` project.
 

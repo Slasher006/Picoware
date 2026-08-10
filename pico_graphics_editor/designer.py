@@ -2850,6 +2850,8 @@ class ScreenFlowWidget(QWidget):
             self.live_status_label.setText(
                 "Start the simulator to render the actual Picoware framebuffer."
             )
+        else:
+            self.live_preview.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _live_target_kind_changed(self, kind: str) -> None:
         """Enable naming only for simulator routes that require a target."""
@@ -3002,6 +3004,8 @@ class ScreenFlowWidget(QWidget):
         self.start_live_button.setEnabled(not running)
         self.restart_live_button.setEnabled(running)
         self.stop_live_button.setEnabled(running)
+        if running and self.preview_mode_combo.currentData() != "designer":
+            self.live_preview.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _send_simulator_event(self) -> None:
         """Send one event through the navigation graph."""

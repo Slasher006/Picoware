@@ -9,6 +9,7 @@ import time
 
 from PySide6.QtCore import (
     QDir,
+    QEvent,
     QObject,
     QPointF,
     QProcess,
@@ -409,6 +410,7 @@ class LiveSimulatorView(QWidget):
         self.setMinimumSize(260, 220)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
+        self.setToolTip("Click the live framebuffer to send Picoware keys.")
 
     def set_frame(self, image: QImage) -> None:
         """Display an owned copy of the latest simulator frame."""
@@ -434,9 +436,27 @@ class LiveSimulatorView(QWidget):
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
             target = self._frame_target()
             painter.drawImage(target, self._image)
-            painter.setPen(QPen(QColor("#59636f"), 1))
+            color = QColor("#00bfff") if self.hasFocus() else QColor("#59636f")
+            painter.setPen(QPen(color, 2 if self.hasFocus() else 1))
             painter.drawRect(target.adjusted(0, 0, -1, -1))
         painter.end()
+
+    def event(self, event) -> bool:
+        """Reserve Picoware keys and keep Tab inside the live framebuffer."""
+        if isinstance(event, QKeyEvent):
+            event_type = event.type()
+            code = self._key_code(event)
+            if event_type == QEvent.Type.ShortcutOverride and code is not None:
+                event.accept()
+                return True
+            if event.key() in {Qt.Key.Key_Tab, Qt.Key.Key_Backtab}:
+                if event_type == QEvent.Type.KeyPress:
+                    self.keyPressEvent(event)
+                    return True
+                if event_type == QEvent.Type.KeyRelease:
+                    self.keyReleaseEvent(event)
+                    return True
+        return super().event(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         """Forward supported Qt key presses as Pico keyboard codes."""
@@ -457,15 +477,27 @@ class LiveSimulatorView(QWidget):
         self.key_event.emit(code, False, False)
         event.accept()
 
+    def focusInEvent(self, event) -> None:
+        """Highlight the framebuffer while it owns Picoware key input."""
+        self.update()
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        """Release held Picoware inputs when framebuffer focus is lost."""
+        self._release_pressed_keys()
+        self.touch_event.emit(0, 0, 0)
+        self.update()
+        super().focusOutEvent(event)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Forward a left-button press as a simulator touch gesture."""
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
         point = self._frame_point(event.position())
         if point is None:
             return
         self.touch_event.emit(round(point.x()), round(point.y()), 6)
-        self.setFocus()
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
@@ -530,6 +562,7 @@ class LiveSimulatorView(QWidget):
             Qt.Key.Key_Return: 13,
             Qt.Key.Key_Enter: 13,
             Qt.Key.Key_Tab: 9,
+            Qt.Key.Key_Backtab: 9,
             Qt.Key.Key_Home: 0xD2,
             Qt.Key.Key_Delete: 0xD4,
             Qt.Key.Key_End: 0xD5,
@@ -538,7 +571,15 @@ class LiveSimulatorView(QWidget):
         }
         if event.key() in mapping:
             return mapping[event.key()]
-        if Qt.Key.Key_F1 <= event.key() <= Qt.Key.Key_F10:
+        if Qt.Key.Key_F1 <= event.key() <= Qt.Key.Key_F9:
             return 0x81 + event.key() - Qt.Key.Key_F1
+        if event.key() == Qt.Key.Key_F10:
+            return 0x90
         text = event.text()
         return ord(text) if len(text) == 1 and ord(text) < 256 else None
+
+    def _release_pressed_keys(self) -> None:
+        """Release every Picoware key still held by the live view."""
+        for code in set(self._pressed_codes.values()):
+            self.key_event.emit(code, False, False)
+        self._pressed_codes.clear()
