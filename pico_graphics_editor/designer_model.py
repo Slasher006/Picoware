@@ -79,6 +79,7 @@ class GuiElement:
     asset_width: int = 0
     asset_height: int = 0
     asset_runs: list[list[int]] = field(default_factory=list)
+    asset_key: str = ""
 
     @classmethod
     def create(cls, kind: str, index: int) -> GuiElement:
@@ -213,7 +214,7 @@ class GuiProject:
     screens: list[ScreenDesign]
     connections: list[FlowConnection] = field(default_factory=list)
     start_screen_id: str = ""
-    format_version: int = 5
+    format_version: int = 6
     import_root: str = ""
     imported_sources: dict[str, str] = field(default_factory=dict)
 
@@ -241,7 +242,7 @@ class GuiProject:
             screens,
             connections,
             str(values.get("start_screen_id", "")),
-            max(5, int(values.get("format_version", 1))),
+            max(6, int(values.get("format_version", 1))),
             str(values.get("import_root", "")),
             {
                 str(path): str(digest)

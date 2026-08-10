@@ -43,6 +43,7 @@ class DesignerModelTests(unittest.TestCase):
         second = ScreenDesign.create("Game", 320, 320, 1)
         target_element = GuiElement.create("icon", 1)
         target_element.asset_call = "draw_badge"
+        target_element.asset_key = "/tmp/assets.py::draw_badge"
         target_element.asset_width = 2
         target_element.asset_height = 2
         target_element.asset_runs = [[0, 0, 1, 0xF800], [1, 1, 1, 0x07E0]]
@@ -83,6 +84,7 @@ class DesignerModelTests(unittest.TestCase):
         )
         loaded_target = loaded.screens[1].elements[0]
         self.assertEqual(loaded_target.asset_call, "draw_badge")
+        self.assertEqual(loaded_target.asset_key, "/tmp/assets.py::draw_badge")
         self.assertEqual(
             (loaded_target.asset_width, loaded_target.asset_height), (2, 2)
         )
@@ -90,7 +92,7 @@ class DesignerModelTests(unittest.TestCase):
             loaded_target.asset_runs,
             [[0, 0, 1, 0xF800], [1, 1, 1, 0x07E0]],
         )
-        self.assertEqual(loaded.format_version, 5)
+        self.assertEqual(loaded.format_version, 6)
 
     def test_generated_python_is_parseable(self) -> None:
         """Generate valid screen drawing and flow methods."""

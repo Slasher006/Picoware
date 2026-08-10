@@ -81,6 +81,7 @@ GENERATED_GRAPHIC_PATTERN = re.compile(
     r"^# Pico graphic (?P<name>[A-Za-z_]\w*) begin\s*$", re.MULTILINE
 )
 GENERATED_GRAPHIC_SIZE = "_pico_graphic_size"
+GENERATED_GRAPHIC_FRAMES = "_pico_graphic_frames"
 
 
 class UnknownValue:
@@ -423,6 +424,9 @@ class SourceScanner:
                 continue
             parameters = function_parameters(record.node, document.constants)
             variants = discover_variants(record.node, parameters, document.constants)
+            frame_values = generated_graphic_frame_values(record.node)
+            if frame_values and "frame" in parameters:
+                variants["frame"] = frame_values
             origin_x, origin_y = infer_origins(parameters)
             assets.append(
                 GraphicsAsset(
@@ -709,8 +713,18 @@ class SourceExporter:
         trace: TraceResult,
         edited: PixelArt,
         variant_values: dict[str, Any] | None = None,
+        managed_frames: list[PixelArt] | None = None,
     ) -> SourcePatch:
         """Create a source patch without writing the file."""
+        if is_managed_graphic(asset):
+            frame_values = generated_graphic_frame_values(asset.record.node)
+            if len(frame_values) > 1 and managed_frames is None:
+                raise ValueError("All managed animation frames are required for saving")
+            return build_new_graphic_patch(
+                asset.document.path,
+                asset.record.name,
+                managed_frames or [edited],
+            )
         changed = edited.changed_pixels(trace.base_art)
         if any(color is None for _, _, color in changed):
             raise ValueError("Transparent erasing cannot be written into draw calls")
@@ -793,6 +807,8 @@ def _new_graphic_source(function_name: str, frames: list[PixelArt]) -> tuple[str
         '    """Draw generated RGB565 pixel graphics."""\n',
         f"    {GENERATED_GRAPHIC_SIZE} = ({frames[0].width}, {frames[0].height})\n",
     ]
+    if animated:
+        lines.append(f"    {GENERATED_GRAPHIC_FRAMES} = {tuple(range(len(frames)))}\n")
     run_count = 0
     for frame_index, art in enumerate(frames):
         blank = PixelArt(art.width, art.height, art.origin_x, art.origin_y)
@@ -894,6 +910,54 @@ def generated_graphic_size(
             return value
         return None
     return None
+
+
+def generated_graphic_frame_values(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[int]:
+    """Return exact managed animation frame values when available."""
+    for statement in node.body:
+        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+            continue
+        target = statement.targets[0]
+        if not isinstance(target, ast.Name) or target.id != GENERATED_GRAPHIC_FRAMES:
+            continue
+        try:
+            value = ast.literal_eval(statement.value)
+        except (TypeError, ValueError):
+            break
+        if (
+            isinstance(value, tuple)
+            and value
+            and all(type(item) is int and item >= 0 for item in value)
+        ):
+            return list(value)
+        break
+    values: set[int] = set()
+    for statement in node.body:
+        if not isinstance(statement, ast.If):
+            continue
+        test = statement.test
+        if (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "frame"
+            and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.Eq)
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and type(test.comparators[0].value) is int
+        ):
+            values.add(test.comparators[0].value)
+    return sorted(values)
+
+
+def is_managed_graphic(asset: GraphicsAsset) -> bool:
+    """Return whether an asset belongs to an editor-managed source block."""
+    return (
+        asset.record.class_name is None
+        and asset.record.name in generated_graphic_names(asset.document.source)
+    )
 
 
 def collect_call_names(node: ast.AST) -> set[str]:

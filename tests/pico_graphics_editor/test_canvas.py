@@ -16,7 +16,7 @@ if str(REPOSITORY_PATH) not in sys.path:
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QScrollArea
 
 from pico_graphics_editor.canvas import PixelCanvas, pixel_art_image
 from pico_graphics_editor.model import PixelArt
@@ -55,6 +55,80 @@ class CanvasTests(unittest.TestCase):
         self.canvas.undo()
         self.assertIsNone(self.canvas.art().pixel(2, 3))
 
+    def test_managed_eraser_clears_to_transparency(self) -> None:
+        """Erase managed pixels without painting a replacement color."""
+        art = PixelArt(8, 8)
+        art.set_pixel(2, 3, 0xF800)
+        self.canvas.set_art(art)
+        self.canvas.set_tool("eraser")
+        self.canvas.set_transparent_eraser(True)
+        QTest.mouseClick(
+            self.canvas,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPoint(25, 35),
+        )
+        self.assertIsNone(self.canvas.art().pixel(2, 3))
+
+    def test_selection_cut_paste_and_undo(self) -> None:
+        """Cut and restore a rectangular pixel selection."""
+        art = PixelArt(8, 8)
+        art.set_pixel(1, 1, 0xF800)
+        art.set_pixel(2, 1, 0x07E0)
+        self.canvas.set_art(art)
+        self.canvas.select_rectangle(1, 1, 2, 1)
+        self.assertTrue(self.canvas.cut_selection())
+        self.assertIsNone(self.canvas.art().pixel(1, 1))
+        self.assertTrue(self.canvas.paste_selection())
+        self.assertEqual(self.canvas.art().pixel(1, 1), 0xF800)
+        self.assertEqual(self.canvas.art().pixel(2, 1), 0x07E0)
+        self.canvas.undo()
+        self.assertIsNone(self.canvas.art().pixel(1, 1))
+
+    def test_selection_drag_moves_pixels_as_one_edit(self) -> None:
+        """Move selected pixels with a mouse drag and undo the gesture."""
+        art = PixelArt(8, 8)
+        art.set_pixel(1, 1, 0xF800)
+        self.canvas.set_art(art)
+        self.canvas.select_rectangle(1, 1, 1, 1)
+        self.canvas.set_tool("select")
+        QTest.mousePress(
+            self.canvas,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPoint(15, 15),
+        )
+        QTest.mouseMove(self.canvas, QPoint(35, 25))
+        QTest.mouseRelease(
+            self.canvas,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPoint(35, 25),
+        )
+        self.assertIsNone(self.canvas.art().pixel(1, 1))
+        self.assertEqual(self.canvas.art().pixel(3, 2), 0xF800)
+        self.canvas.undo()
+        self.assertEqual(self.canvas.art().pixel(1, 1), 0xF800)
+
+    def test_selection_transforms_and_document_dimensions(self) -> None:
+        """Flip, rotate, crop, resize, and scale pixel artwork."""
+        art = PixelArt(4, 3)
+        art.set_pixel(0, 0, 0xF800)
+        art.set_pixel(1, 0, 0x07E0)
+        self.canvas.set_art(art)
+        self.canvas.select_rectangle(0, 0, 2, 1)
+        self.canvas.flip_selection(True)
+        self.assertEqual(self.canvas.art().pixel(0, 0), 0x07E0)
+        self.assertEqual(self.canvas.art().pixel(1, 0), 0xF800)
+        self.canvas.rotate_selection_clockwise()
+        self.assertEqual(self.canvas.selection(), (0, 0, 1, 2))
+        self.canvas.crop_to_selection()
+        self.assertEqual((self.canvas.art().width, self.canvas.art().height), (1, 2))
+        self.canvas.resize_canvas(3, 4, True)
+        self.assertEqual((self.canvas.art().width, self.canvas.art().height), (3, 4))
+        self.canvas.scale_artwork(6, 8)
+        self.assertEqual((self.canvas.art().width, self.canvas.art().height), (6, 8))
+
     def test_image_preserves_transparency(self) -> None:
         """Export empty pixels with zero alpha."""
         image = pixel_art_image(self.canvas.art())
@@ -81,6 +155,38 @@ class CanvasTests(unittest.TestCase):
         self.canvas.wheelEvent(event)
         self.assertEqual(self.canvas.zoom(), 11)
         self.assertTrue(event.isAccepted())
+
+    def test_middle_mouse_pans_scrollable_canvas(self) -> None:
+        """Pan a zoomed canvas while holding the middle mouse button."""
+        self.canvas.set_art(PixelArt(40, 40))
+        self.canvas.set_zoom(10)
+        scroll = QScrollArea()
+        scroll.resize(220, 180)
+        scroll.setWidget(self.canvas)
+        scroll.show()
+        self.application.processEvents()
+        horizontal = scroll.horizontalScrollBar()
+        vertical = scroll.verticalScrollBar()
+        horizontal.setValue(100)
+        vertical.setValue(100)
+        before = (horizontal.value(), vertical.value())
+        QTest.mousePress(
+            self.canvas,
+            Qt.MouseButton.MiddleButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPoint(150, 130),
+        )
+        QTest.mouseMove(self.canvas, QPoint(100, 80))
+        QTest.mouseRelease(
+            self.canvas,
+            Qt.MouseButton.MiddleButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPoint(100, 80),
+        )
+        self.assertGreater(horizontal.value(), before[0])
+        self.assertGreater(vertical.value(), before[1])
+        scroll.takeWidget()
+        scroll.close()
 
     def test_onion_frame_aligns_by_source_origin(self) -> None:
         """Align a previous frame without changing active pixels."""

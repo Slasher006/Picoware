@@ -35,13 +35,18 @@ Open a renderer or project immediately:
 1. Open a Python file or project folder.
 2. Select a detected graphic from the thumbnail catalogue.
 3. Choose any inferred parameter variants.
-4. Draw with the pencil, eraser, fill, line, rectangle, or picker tool.
+4. Draw with the select, pencil, eraser, fill, line, rectangle, or picker tool.
 5. Review the actual-size preview.
 6. Select **Review and apply to Python**.
 7. Inspect the exact source diff before applying it.
 
-The eraser paints with its configured RGB565 background color. Right-click the canvas to pick an existing color.
-Use the mouse wheel over the canvas to zoom in or out. The toolbar zoom value follows the wheel automatically.
+The inspector labels every selected graphic as either a **managed asset** or a **source-backed asset**. Assets created by this editor are managed: pixels can be transparent and the complete generated block can be resized or rewritten. Handwritten Python remains source-backed: edits are emitted as conservative overlays, so destructive transparency, pasting transparent pixels, and document resizing stay disabled.
+
+Use **Select** or press `S` to drag a rectangular selection. A selection can be moved with the mouse, cut, copied, pasted, deleted, flipped, rotated, or cropped. **Resize Canvas** preserves pixel size and optionally centers the existing art; **Scale Artwork** uses nearest-neighbor scaling. All pixel-changing operations participate in undo and redo. For source-backed graphics, selection and copy remain available without rewriting arbitrary drawing logic.
+
+The eraser clears to transparency for managed assets and paints with the configured RGB565 background color for source-backed assets. Right-click the canvas to pick an existing color. Use the mouse wheel over the canvas to zoom in or out, and hold the middle mouse button while dragging to pan a zoomed canvas. The toolbar zoom value follows the wheel automatically.
+
+Leaving a changed asset opens a **Save**, **Discard**, or **Cancel** prompt. Dirty pixel work is also atomically autosaved after a short delay and can be reopened from **Pixel Art > Recover Autosaved Pixel Asset...**. A successful save or an explicit discard removes that recovery draft.
 
 ## Reference images
 
@@ -57,15 +62,15 @@ The **Reference image** panel supports PNG, JPEG, WebP, BMP, and GIF files. A re
 
 No AI conversion is used.
 
-**Create new Python graphic** creates a new module-level drawing function from the positioned reference or imported animation frames. After the reviewed RGB565 runs are written, the exact generated function is automatically loaded into the pixel editor and appears immediately in the App GUI pixel-asset catalogue. Further mouse edits enable **Apply to Python** and write back to the same destination.
+**New Asset** in the Pixel Art toolbar creates a blank transparent asset, a copy of the current canvas, an asset from the current reference, or an animation from an image file, sprite sheet, or already imported frames. The destination is a marked module-level Python drawing function. After the reviewed RGB565 runs are written, the exact generated function is automatically loaded into the pixel editor and appears immediately in the App GUI pixel-asset catalogue. Further mouse edits use **Review and save managed asset** to rewrite only that editor-owned block.
 
 ## Animation frames
 
 Functions with inferred `frame`, `phase`, or `animation_time` variants get a dedicated **Animation frames** panel. Use **Previous** and **Next** or the frame selector to edit each state, **Play** to preview the sequence, and **Show previous frame** for an onion-skin drawing guide.
 
-Animated GIF and WebP files can be imported directly. Static sprite sheets can be divided by frame width, height, outer margin, and spacing. Frames can be added, duplicated, removed when imported, reordered for playback, and previewed at an adjustable interval.
+Animated GIF and WebP files can be imported directly. Static sprite sheets can be divided by frame width, height, outer margin, and spacing. Frames can be added, duplicated, reordered, and previewed at an adjustable interval. Managed animation frames can also be deleted, and their complete saved order is written back together. Frames inferred from handwritten source remain protected; only imported additions can be removed there.
 
-Apply an edited frame to Python before selecting another frame. The generated overlay is limited to the selected frame and the exact source diff is still shown before writing.
+Save or discard an edited frame before selecting another frame. A managed animation save preserves every frame, while a source-backed edit generates an overlay limited to the selected frame. The exact source diff is always shown before writing.
 
 ## App GUI workspace
 
@@ -80,6 +85,8 @@ Screens support these visual elements:
 - Progress indicators
 
 Drag buttons, labels, panels, rectangles, icons, lists, and progress indicators from the element palette directly onto the canvas. The **Pixel assets** catalogue also shows graphics discovered in the currently opened Python file or folder; drag one onto the screen, double-click it, or use **Add selected asset**. Its RGB565 pixels are embedded in the GUI project so designer previews, saved projects, Python exports, and the live simulator keep the same appearance without importing the original drawing function. Palette buttons can still be clicked for quick insertion. Elements can then be selected, dragged, resized, renamed, hidden, recolored, and positioned numerically. Mouse-wheel zoom, an optional grid, configurable snapping, alignment, and even-spacing controls make precise layouts faster.
+
+Use **Use in App GUI** from Pixel Art to switch workspaces with the active asset selected and ready to drag. Icons inserted this way retain their source-asset link. Select a linked icon and choose **Refresh pixel asset** to pull in its latest saved pixels, or **Edit in Pixel Art** to reopen the original graphic. Refresh is explicit, so an existing GUI design never changes silently after a source rescan.
 
 Shift-click or drag a selection rectangle to edit several elements together. Arrow keys move the selection by one pixel, Shift+Arrow moves it by ten, Ctrl+D duplicates it, and Delete removes design-only elements. The hierarchy acts as a layers panel: drag rows to reorder drawing depth, or use the lock and visibility controls. Screen rows include live thumbnails of their actual contents and can also be reordered by dragging.
 
@@ -144,6 +151,7 @@ The profile works with direct calls such as `self.draw._fill_rectangle(...)` and
 - Unsupported expressions remain unresolved and are listed in Scanner notes.
 - Pixel edits are written as compact horizontal RGB565 runs.
 - Generated runs are isolated inside marked blocks.
+- Only editor-managed marked blocks are fully regenerated.
 - Existing renderer logic remains in place below the overlay.
 - The complete diff is shown before writing.
 - Every applied edit creates a timestamped backup in the operating system's application-data folder.

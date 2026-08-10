@@ -26,7 +26,12 @@ from PySide6.QtWidgets import (
 from pico_graphics_editor.model import PixelArt
 from pico_graphics_editor.source import SourcePatch, build_new_graphic_patch
 from pico_graphics_editor.designer_model import GuiProject
-from pico_graphics_editor.window import DiffDialog, MainWindow, MultiPatchDialog
+from pico_graphics_editor.window import (
+    DiffDialog,
+    MainWindow,
+    MultiPatchDialog,
+    NewGraphicDialog,
+)
 
 
 ANIMATION_SOURCE = '''class Renderer:
@@ -94,6 +99,26 @@ class WindowTests(unittest.TestCase):
         self.window.workspace_tabs.setCurrentIndex(0)
         self.assertFalse(self.window.tool_bar.isHidden())
 
+    def test_new_asset_dialog_offers_explicit_creation_modes(self) -> None:
+        """Choose blank, current, reference, or animation asset sources."""
+        dialog = NewGraphicDialog(24, 16, True, 3)
+        modes = {
+            dialog.mode_combo.itemData(index)
+            for index in range(dialog.mode_combo.count())
+        }
+        self.assertEqual(
+            modes,
+            {
+                "blank",
+                "current",
+                "reference",
+                "animation_file",
+                "imported_frames",
+            },
+        )
+        self.assertEqual(dialog.settings(), ("draw_new_graphic", 24, 16, "blank"))
+        dialog.close()
+
     def test_apply_buttons_accept_source_review_dialogs(self) -> None:
         """Close source review dialogs when their Apply buttons are clicked."""
         source_patch = SourcePatch(
@@ -157,6 +182,8 @@ class WindowTests(unittest.TestCase):
         self.assertIsNotNone(self.window.current_asset)
         self.assertEqual(self.window.current_asset.record.name, "draw_badge")
         self.assertEqual(self.window._scan_path, target.resolve())
+        self.assertIn("Managed asset", self.window.asset_mode_label.text())
+        self.assertTrue(self.window.resize_canvas_action.isEnabled())
         self.assertEqual(self.window.screen_designer.pixel_asset_list.count(), 1)
         pixel_item = self.window.screen_designer.pixel_asset_list.item(0)
         self.assertEqual(pixel_item.text(), "draw_badge")
@@ -181,6 +208,55 @@ class WindowTests(unittest.TestCase):
         refreshed_asset = next(iter(self.window.screen_designer.pixel_assets.values()))
         self.assertEqual(refreshed_asset.art.pixel(0, 0), 0x07E0)
 
+    def test_pixel_draft_recovery_restores_unsaved_managed_art(self) -> None:
+        """Recover unsaved managed pixels from an atomic draft."""
+        target = Path(self.temporary.name) / "recover_asset.py"
+        art = PixelArt(3, 2)
+        art.set_pixel(0, 0, 0xF800)
+        source_patch = build_new_graphic_patch(target, "draw_recover", [art])
+        source_patch.apply(Path(self.temporary.name) / "creation-backups")
+        self.assertTrue(self.window._open_created_graphic(target, source_patch.key))
+        recovery_path = Path(self.temporary.name) / "pixel-recovery.json"
+        self.window._pixel_recovery_path = lambda: recovery_path
+        self.window.canvas.art().set_pixel(1, 1, 0x07E0)
+        self.window._canvas_changed()
+        self.window._write_pixel_recovery()
+        self.assertTrue(recovery_path.is_file())
+        self.window.canvas.art().set_pixel(1, 1, None)
+        with mock_patch.object(self.window, "_confirm_discard", return_value=True):
+            self.window._recover_pixel_asset()
+        self.assertEqual(self.window.canvas.art().pixel(1, 1), 0x07E0)
+        self.assertTrue(self.window._dirty)
+        self.window._dirty = False
+        self.window._clear_pixel_recovery()
+
+    def test_save_discard_prompt_can_save_pixel_edits(self) -> None:
+        """Offer Save before abandoning a dirty pixel asset."""
+        self.window._dirty = True
+        with (
+            mock_patch.object(
+                QMessageBox,
+                "question",
+                return_value=QMessageBox.StandardButton.Save,
+            ),
+            mock_patch.object(
+                self.window,
+                "_apply_to_source",
+                return_value=True,
+            ) as apply_source,
+        ):
+            self.assertTrue(self.window._confirm_discard())
+        apply_source.assert_called_once_with()
+        self.window._dirty = False
+
+    def test_current_pixel_asset_can_be_handed_to_gui_designer(self) -> None:
+        """Select the current source asset in the App GUI catalogue."""
+        self.window._use_current_asset_in_gui()
+        self.assertEqual(self.window.workspace_tabs.currentIndex(), 1)
+        item = self.window.screen_designer.pixel_asset_list.currentItem()
+        self.assertIsNotNone(item)
+        self.assertIn("animation.py", str(item.data(Qt.ItemDataRole.UserRole)))
+
     def test_animation_frames_can_be_duplicated_and_reordered(self) -> None:
         """Duplicate a source frame and change playback order."""
         original_count = self.window.frame_combo.count()
@@ -190,6 +266,47 @@ class WindowTests(unittest.TestCase):
         self.window._move_animation_frame(-1)
         self.assertEqual(self.window.frame_combo.currentData(), duplicated_value)
         self.assertIn(duplicated_value, self.window.animation_drafts)
+
+    def test_managed_animation_structure_changes_are_saved(self) -> None:
+        """Persist managed frame deletion instead of treating it as preview-only."""
+        target = Path(self.temporary.name) / "managed_animation.py"
+        first = PixelArt(2, 2)
+        first.set_pixel(0, 0, 0xF800)
+        second = PixelArt(2, 2)
+        second.set_pixel(1, 0, 0x07E0)
+        source_patch = build_new_graphic_patch(
+            target, "draw_managed_animation", [first, second]
+        )
+        source_patch.apply(Path(self.temporary.name) / "creation-backups")
+        self.assertTrue(self.window._open_created_graphic(target, source_patch.key))
+        self.assertEqual(self.window.frame_combo.count(), 2)
+        self.window._delete_animation_frame()
+        self.assertEqual(self.window.frame_combo.count(), 1)
+        self.assertTrue(self.window._dirty)
+        frames = self.window._managed_frames_for_save()
+        self.assertIsNotNone(frames)
+        self.assertEqual(len(frames), 1)
+        self.window._dirty = False
+        self.window._animation_structure_dirty = False
+
+    def test_managed_canvas_can_be_cleared_and_undone(self) -> None:
+        """Clear all managed pixels after confirmation and retain undo."""
+        target = Path(self.temporary.name) / "managed_clear.py"
+        art = PixelArt(2, 2)
+        art.set_pixel(0, 0, 0xF800)
+        source_patch = build_new_graphic_patch(target, "draw_clear", [art])
+        source_patch.apply(Path(self.temporary.name) / "creation-backups")
+        self.assertTrue(self.window._open_created_graphic(target, source_patch.key))
+        with mock_patch.object(
+            QMessageBox,
+            "question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ):
+            self.window._clear_pixel_canvas()
+        self.assertTrue(all(color is None for color in self.window.canvas.art().pixels))
+        self.window.canvas.undo()
+        self.assertEqual(self.window.canvas.art().pixel(0, 0), 0xF800)
+        self.window._dirty = False
 
     def test_playback_and_onion_skin_are_available(self) -> None:
         """Enable frame playback and the previous-frame overlay."""

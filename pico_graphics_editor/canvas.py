@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QWheelEvent
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QAbstractScrollArea, QWidget
 
 from .model import PixelArt, rgb565_to_rgb
 from .reference import image_to_pixel_art, prepare_reference_image
@@ -16,6 +16,7 @@ class PixelCanvas(QWidget):
     color_picked = Signal(int)
     document_changed = Signal()
     cursor_changed = Signal(int, int, object)
+    selection_changed = Signal(bool)
     zoom_changed = Signal(int)
 
     def __init__(self, parent: QWidget | None = None):
@@ -25,6 +26,7 @@ class PixelCanvas(QWidget):
         self._tool = "pencil"
         self._color = 0xFFFF
         self._background = 0x0000
+        self._erase_transparent = False
         self._zoom = 12
         self._show_grid = True
         self._undo: list[PixelArt] = []
@@ -33,6 +35,15 @@ class PixelCanvas(QWidget):
         self._start: tuple[int, int] | None = None
         self._last: tuple[int, int] | None = None
         self._gesture_base: PixelArt | None = None
+        self._selection: QRect | None = None
+        self._selection_mode = ""
+        self._selection_origin: QRect | None = None
+        self._selection_pixels: PixelArt | None = None
+        self._selection_move_changed = False
+        self._clipboard: PixelArt | None = None
+        self._panning = False
+        self._pan_start = QPoint()
+        self._pan_scroll = QPoint()
         self._display_cache: QImage | None = None
         self._checker_cache: QImage | None = None
         self._onion_art: PixelArt | None = None
@@ -64,6 +75,10 @@ class PixelCanvas(QWidget):
         self._undo.clear()
         self._redo.clear()
         self._gesture_base = None
+        self._selection = None
+        self._selection_mode = ""
+        self._selection_origin = None
+        self._selection_pixels = None
         self._display_cache = None
         self._checker_cache = None
         self._onion_art = None
@@ -71,6 +86,7 @@ class PixelCanvas(QWidget):
         self._rebuild_reference_cache()
         self._update_size()
         self.update()
+        self.selection_changed.emit(False)
         self.document_changed.emit()
 
     def apply_art(self, art: PixelArt) -> None:
@@ -99,6 +115,174 @@ class PixelCanvas(QWidget):
     def set_background_color(self, color: int) -> None:
         """Set the eraser replacement color."""
         self._background = color & 0xFFFF
+
+    def set_transparent_eraser(self, enabled: bool) -> None:
+        """Choose whether erasing clears pixels instead of painting a color."""
+        self._erase_transparent = enabled
+
+    def selection(self) -> tuple[int, int, int, int] | None:
+        """Return the active pixel selection rectangle."""
+        if self._selection is None:
+            return None
+        return (
+            self._selection.x(),
+            self._selection.y(),
+            self._selection.width(),
+            self._selection.height(),
+        )
+
+    def select_all(self) -> None:
+        """Select the complete pixel document."""
+        self._set_selection(QRect(0, 0, self._art.width, self._art.height))
+
+    def select_rectangle(self, x: int, y: int, width: int, height: int) -> None:
+        """Select a clipped document rectangle."""
+        rectangle = QRect(x, y, width, height).intersected(
+            QRect(0, 0, self._art.width, self._art.height)
+        )
+        self._set_selection(rectangle if not rectangle.isEmpty() else None)
+
+    def clear_selection(self) -> None:
+        """Remove the active pixel selection without changing pixels."""
+        self._set_selection(None)
+
+    def copy_selection(self) -> bool:
+        """Copy selected pixels into the internal pixel clipboard."""
+        if self._selection is None:
+            return False
+        self._clipboard = self._copy_rect(self._selection)
+        return True
+
+    def has_clipboard(self) -> bool:
+        """Return whether the internal pixel clipboard has content."""
+        return self._clipboard is not None
+
+    def cut_selection(self) -> bool:
+        """Copy and clear the active pixel selection."""
+        if not self.copy_selection():
+            return False
+        return self.delete_selection()
+
+    def paste_selection(self) -> bool:
+        """Paste internal clipboard pixels at the selection or canvas origin."""
+        if self._clipboard is None:
+            return False
+        target_x = self._selection.x() if self._selection is not None else 0
+        target_y = self._selection.y() if self._selection is not None else 0
+        self._push_undo()
+        for y in range(self._clipboard.height):
+            for x in range(self._clipboard.width):
+                self._art.set_pixel(
+                    target_x + x,
+                    target_y + y,
+                    self._clipboard.pixel(x, y),
+                )
+        width = min(self._clipboard.width, self._art.width - target_x)
+        height = min(self._clipboard.height, self._art.height - target_y)
+        self._set_selection(QRect(target_x, target_y, width, height), emit=False)
+        self._finish_edit()
+        return True
+
+    def delete_selection(self) -> bool:
+        """Clear selected pixels to transparency."""
+        if self._selection is None:
+            return False
+        self._push_undo()
+        self._clear_rect(self._art, self._selection)
+        self._finish_edit()
+        return True
+
+    def flip_selection(self, horizontal: bool) -> None:
+        """Flip the selection or complete artwork along one axis."""
+        rectangle = self._operation_rect()
+        source = self._copy_rect(rectangle)
+        self._push_undo()
+        for y in range(source.height):
+            for x in range(source.width):
+                source_x = source.width - 1 - x if horizontal else x
+                source_y = y if horizontal else source.height - 1 - y
+                self._art.set_pixel(
+                    rectangle.x() + x,
+                    rectangle.y() + y,
+                    source.pixel(source_x, source_y),
+                )
+        self._finish_edit()
+
+    def rotate_selection_clockwise(self) -> None:
+        """Rotate the selection or complete artwork clockwise."""
+        rectangle = self._operation_rect()
+        source = self._copy_rect(rectangle)
+        rotated = PixelArt(source.height, source.width)
+        for y in range(source.height):
+            for x in range(source.width):
+                rotated.set_pixel(source.height - 1 - y, x, source.pixel(x, y))
+        self._push_undo()
+        if self._selection is None:
+            rotated.origin_x = self._art.origin_x
+            rotated.origin_y = self._art.origin_y
+            self._replace_art(rotated)
+            return
+        self._clear_rect(self._art, rectangle)
+        self._paste_art(rotated, rectangle.x(), rectangle.y())
+        width = min(rotated.width, self._art.width - rectangle.x())
+        height = min(rotated.height, self._art.height - rectangle.y())
+        self._set_selection(
+            QRect(rectangle.x(), rectangle.y(), width, height), emit=False
+        )
+        self._finish_edit()
+
+    def crop_to_selection(self) -> bool:
+        """Crop the document to its active selection."""
+        if self._selection is None:
+            return False
+        cropped = self._copy_rect(self._selection)
+        cropped.origin_x = 0
+        cropped.origin_y = 0
+        self._push_undo()
+        self._selection = None
+        self._replace_art(cropped)
+        return True
+
+    def resize_canvas(
+        self, width: int, height: int, center_content: bool = False
+    ) -> None:
+        """Resize the canvas while preserving existing pixels."""
+        width = max(1, min(320, width))
+        height = max(1, min(320, height))
+        resized = PixelArt(width, height)
+        offset_x = (width - self._art.width) // 2 if center_content else 0
+        offset_y = (height - self._art.height) // 2 if center_content else 0
+        for y in range(self._art.height):
+            for x in range(self._art.width):
+                resized.set_pixel(offset_x + x, offset_y + y, self._art.pixel(x, y))
+        self._push_undo()
+        self._selection = None
+        self._replace_art(resized)
+
+    def scale_artwork(self, width: int, height: int) -> None:
+        """Scale all artwork with nearest-neighbor pixel sampling."""
+        width = max(1, min(320, width))
+        height = max(1, min(320, height))
+        scaled = PixelArt(width, height)
+        for y in range(height):
+            source_y = min(self._art.height - 1, y * self._art.height // height)
+            for x in range(width):
+                source_x = min(self._art.width - 1, x * self._art.width // width)
+                scaled.set_pixel(x, y, self._art.pixel(source_x, source_y))
+        self._push_undo()
+        self._selection = None
+        self._replace_art(scaled)
+
+    def clear_art(self) -> None:
+        """Clear the complete document to transparency."""
+        self._push_undo()
+        self._art = PixelArt(
+            self._art.width,
+            self._art.height,
+            self._art.origin_x,
+            self._art.origin_y,
+        )
+        self._finish_edit()
 
     def set_zoom(self, zoom: int) -> None:
         """Set the integer display zoom."""
@@ -219,9 +403,8 @@ class PixelCanvas(QWidget):
             return
         self._redo.append(self._art.copy())
         self._art = self._undo.pop()
-        self._display_cache = None
-        self.update()
-        self.document_changed.emit()
+        self._selection = None
+        self._replace_art(self._art, emit_selection=True)
 
     def redo(self) -> None:
         """Restore the next pixel state."""
@@ -229,9 +412,8 @@ class PixelCanvas(QWidget):
             return
         self._undo.append(self._art.copy())
         self._art = self._redo.pop()
-        self._display_cache = None
-        self.update()
-        self.document_changed.emit()
+        self._selection = None
+        self._replace_art(self._art, emit_selection=True)
 
     def sizeHint(self) -> QSize:
         """Return the zoomed document size."""
@@ -277,10 +459,31 @@ class PixelCanvas(QWidget):
                 painter.drawLine(x * cell, 0, x * cell, self._art.height * cell)
             for y in range(self._art.height + 1):
                 painter.drawLine(0, y * cell, self._art.width * cell, y * cell)
+        if self._selection is not None:
+            selection = QRect(
+                self._selection.x() * cell,
+                self._selection.y() * cell,
+                self._selection.width() * cell,
+                self._selection.height() * cell,
+            )
+            painter.setPen(QPen(QColor("#00aaff"), 2, Qt.PenStyle.DashLine))
+            painter.drawRect(selection.adjusted(1, 1, -1, -1))
         painter.end()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Begin drawing or pick a color."""
+        if event.button() == Qt.MouseButton.MiddleButton:
+            scroll_area = self._scroll_area()
+            if scroll_area is not None:
+                self._panning = True
+                self._pan_start = event.globalPosition().toPoint()
+                self._pan_scroll = QPoint(
+                    scroll_area.horizontalScrollBar().value(),
+                    scroll_area.verticalScrollBar().value(),
+                )
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return
         point = self._pixel_at(event.position().toPoint())
         if point is None:
             return
@@ -291,6 +494,20 @@ class PixelCanvas(QWidget):
                 self.color_picked.emit(color)
             return
         if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._tool == "select":
+            self._drawing = True
+            self._start = point
+            self._last = point
+            if self._selection is not None and self._selection.contains(x, y):
+                self._selection_mode = "move"
+                self._gesture_base = self._art.copy()
+                self._selection_origin = QRect(self._selection)
+                self._selection_pixels = self._copy_rect(self._selection)
+                self._selection_move_changed = False
+            else:
+                self._selection_mode = "marquee"
+                self._set_selection(QRect(x, y, 1, 1))
             return
         self._push_undo()
         self._drawing = True
@@ -309,12 +526,80 @@ class PixelCanvas(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         """Continue drawing and report cursor coordinates."""
+        if self._panning:
+            scroll_area = self._scroll_area()
+            if scroll_area is not None:
+                delta = event.globalPosition().toPoint() - self._pan_start
+                scroll_area.horizontalScrollBar().setValue(
+                    self._pan_scroll.x() - delta.x()
+                )
+                scroll_area.verticalScrollBar().setValue(
+                    self._pan_scroll.y() - delta.y()
+                )
+            event.accept()
+            return
         point = self._pixel_at(event.position().toPoint())
         if point is None:
             return
         x, y = point
         self.cursor_changed.emit(x, y, self._art.pixel(x, y))
         if not self._drawing or not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        if self._tool == "select" and self._start is not None:
+            start_x, start_y = self._start
+            if self._selection_mode == "marquee":
+                left, right = sorted((start_x, x))
+                top, bottom = sorted((start_y, y))
+                self._set_selection(
+                    QRect(left, top, right - left + 1, bottom - top + 1)
+                )
+            elif (
+                self._selection_mode == "move"
+                and self._gesture_base is not None
+                and self._selection_pixels is not None
+                and self._selection_origin is not None
+            ):
+                delta_x = x - start_x
+                delta_y = y - start_y
+                source_rect = self._selection_origin
+                target_x = max(
+                    0,
+                    min(
+                        self._art.width - source_rect.width(), source_rect.x() + delta_x
+                    ),
+                )
+                target_y = max(
+                    0,
+                    min(
+                        self._art.height - source_rect.height(),
+                        source_rect.y() + delta_y,
+                    ),
+                )
+                if (
+                    target_x == source_rect.x()
+                    and target_y == source_rect.y()
+                    and not self._selection_move_changed
+                ):
+                    return
+                if not self._selection_move_changed:
+                    self._push_undo()
+                    self._selection_move_changed = True
+                self._art = self._gesture_base.copy()
+                self._clear_rect(self._art, source_rect)
+                self._paste_art(self._selection_pixels, target_x, target_y)
+                self._set_selection(
+                    QRect(
+                        target_x,
+                        target_y,
+                        source_rect.width(),
+                        source_rect.height(),
+                    ),
+                    emit=False,
+                )
+                self._last = point
+                self._display_cache = None
+                self.update()
+                self.document_changed.emit()
             return
         if self._tool in {"pencil", "eraser"} and self._last is not None:
             last_x, last_y = self._last
@@ -341,7 +626,22 @@ class PixelCanvas(QWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         """Finish the active drawing gesture."""
+        if event.button() == Qt.MouseButton.MiddleButton and self._panning:
+            self._panning = False
+            self.unsetCursor()
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._drawing:
+            if self._tool == "select" and self._selection_mode == "marquee":
+                self._drawing = False
+                self._start = None
+                self._last = None
+                self._selection_mode = ""
+                self.update()
+                return
+            if self._tool == "select" and not self._selection_move_changed:
+                self._finish_gesture(emit_change=False)
+                return
             self._finish_gesture()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
@@ -354,8 +654,10 @@ class PixelCanvas(QWidget):
         self.set_zoom(self._zoom + direction)
         event.accept()
 
-    def _paint_color(self) -> int:
+    def _paint_color(self) -> int | None:
         """Return the active tool's paint color."""
+        if self._tool == "eraser" and self._erase_transparent:
+            return None
         return self._background if self._tool == "eraser" else self._color
 
     def _pixel_at(self, point: QPoint) -> tuple[int, int] | None:
@@ -373,18 +675,88 @@ class PixelCanvas(QWidget):
             self._undo.pop(0)
         self._redo.clear()
 
-    def _finish_gesture(self) -> None:
+    def _finish_gesture(self, emit_change: bool = True) -> None:
         """Finish drawing and emit one update."""
         self._drawing = False
         self._start = None
         self._last = None
         self._gesture_base = None
+        self._selection_mode = ""
+        self._selection_origin = None
+        self._selection_pixels = None
+        self._selection_move_changed = False
         self.update()
+        if emit_change:
+            self.document_changed.emit()
+
+    def _operation_rect(self) -> QRect:
+        """Return the selection or complete document rectangle."""
+        return self._selection or QRect(0, 0, self._art.width, self._art.height)
+
+    def _copy_rect(self, rectangle: QRect) -> PixelArt:
+        """Copy one document rectangle into a normalized pixel surface."""
+        copied = PixelArt(rectangle.width(), rectangle.height())
+        for y in range(rectangle.height()):
+            for x in range(rectangle.width()):
+                copied.set_pixel(
+                    x,
+                    y,
+                    self._art.pixel(rectangle.x() + x, rectangle.y() + y),
+                )
+        return copied
+
+    def _clear_rect(self, art: PixelArt, rectangle: QRect) -> None:
+        """Clear one rectangle on a pixel surface."""
+        for y in range(rectangle.y(), rectangle.y() + rectangle.height()):
+            for x in range(rectangle.x(), rectangle.x() + rectangle.width()):
+                art.set_pixel(x, y, None)
+
+    def _paste_art(self, source: PixelArt, target_x: int, target_y: int) -> None:
+        """Paste all source pixels into the active document."""
+        for y in range(source.height):
+            for x in range(source.width):
+                self._art.set_pixel(target_x + x, target_y + y, source.pixel(x, y))
+
+    def _set_selection(self, rectangle: QRect | None, emit: bool = True) -> None:
+        """Set and optionally announce the active selection rectangle."""
+        self._selection = rectangle
+        self.update()
+        if emit:
+            self.selection_changed.emit(rectangle is not None)
+
+    def _finish_edit(self) -> None:
+        """Refresh caches and announce one completed pixel edit."""
+        self._display_cache = None
+        self._checker_cache = None
+        self.update()
+        self.document_changed.emit()
+
+    def _replace_art(self, art: PixelArt, emit_selection: bool = True) -> None:
+        """Replace pixel dimensions while retaining undo history."""
+        self._art = art.copy()
+        self._display_cache = None
+        self._checker_cache = None
+        self._onion_art = None
+        self._onion_cache = None
+        self._rebuild_reference_cache()
+        self._update_size()
+        self.update()
+        if emit_selection:
+            self.selection_changed.emit(self._selection is not None)
         self.document_changed.emit()
 
     def _update_size(self) -> None:
         """Update fixed size for scrolling."""
         self.setFixedSize(self.sizeHint())
+
+    def _scroll_area(self) -> QAbstractScrollArea | None:
+        """Return the nearest scroll area containing the canvas."""
+        ancestor = self.parentWidget()
+        while ancestor is not None:
+            if isinstance(ancestor, QAbstractScrollArea):
+                return ancestor
+            ancestor = ancestor.parentWidget()
+        return None
 
     def _rebuild_reference_cache(self) -> None:
         """Rebuild the transformed tracing reference."""

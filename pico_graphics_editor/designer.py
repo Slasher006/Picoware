@@ -1057,6 +1057,8 @@ class DesignCanvas(QWidget):
 class ScreenDesignerWidget(QWidget):
     """Design complete application screens with direct manipulation."""
 
+    pixel_asset_edit_requested = Signal(str)
+
     def __init__(self, session: DesignerSession, parent: QWidget | None = None):
         """Build the screen designer workspace."""
         super().__init__(parent)
@@ -1241,6 +1243,8 @@ class ScreenDesignerWidget(QWidget):
         self.element_text_edit.setPlaceholderText("Use \\n for list rows")
         self.asset_call_edit = QLineEdit()
         self.asset_call_edit.setPlaceholderText("Optional icon function")
+        self.refresh_pixel_asset_button = QPushButton("Refresh pixel asset")
+        self.edit_pixel_asset_button = QPushButton("Edit in Pixel Art")
         self.visible_check = QCheckBox("Visible")
         self.enabled_check = QCheckBox("Input enabled")
         self.focusable_check = QCheckBox("Keyboard focusable")
@@ -1281,6 +1285,8 @@ class ScreenDesignerWidget(QWidget):
         property_form.addRow("Height", self.height_spin)
         property_form.addRow("Text", self.element_text_edit)
         property_form.addRow("Asset call", self.asset_call_edit)
+        property_form.addRow(self.refresh_pixel_asset_button)
+        property_form.addRow(self.edit_pixel_asset_button)
         property_form.addRow(self.visible_check)
         property_form.addRow(self.enabled_check)
         property_form.addRow(self.focusable_check)
@@ -1321,6 +1327,10 @@ class ScreenDesignerWidget(QWidget):
         )
         self.pixel_asset_list.itemDoubleClicked.connect(self._pixel_asset_activated)
         self.add_pixel_asset_button.clicked.connect(self._add_selected_pixel_asset)
+        self.refresh_pixel_asset_button.clicked.connect(
+            self._refresh_selected_pixel_asset
+        )
+        self.edit_pixel_asset_button.clicked.connect(self._edit_selected_pixel_asset)
         self.zoom_spin.valueChanged.connect(self.canvas.set_zoom)
         self.grid_visible_check.toggled.connect(self.canvas.set_grid_visible)
         self.snap_check.toggled.connect(self.canvas.set_snap_enabled)
@@ -1600,6 +1610,15 @@ class ScreenDesignerWidget(QWidget):
             existing.setToolTip(replacement.toolTip())
         self._pixel_asset_selection_changed()
 
+    def select_pixel_asset(self, key: str) -> bool:
+        """Select one source pixel asset in the designer catalogue."""
+        item = self._pixel_asset_item_for_key(key)
+        if item is None:
+            return False
+        self.pixel_asset_list.setCurrentItem(item)
+        self.pixel_asset_list.scrollToItem(item)
+        return True
+
     def _pixel_asset_item(self, asset: GuiPixelAsset) -> QListWidgetItem:
         """Build one source pixel asset catalogue item."""
         image = pixel_art_image(asset.art, checker=True)
@@ -1664,6 +1683,7 @@ class ScreenDesignerWidget(QWidget):
         element.name = f"{asset.name}_{len(screen.elements) + 1}"
         element.text = ""
         element.asset_call = asset.function_name
+        element.asset_key = asset.key
         element.asset_width = asset.art.width
         element.asset_height = asset.art.height
         blank = PixelArt(
@@ -1693,6 +1713,37 @@ class ScreenDesignerWidget(QWidget):
         self.selected_element_id = element.id
         self.selected_element_ids = {element.id}
         self.session.mark_changed()
+
+    def _refresh_selected_pixel_asset(self) -> None:
+        """Refresh selected icon pixels from its linked catalogue asset."""
+        element = self._selected_element()
+        if element is None or element.kind != "icon" or not element.asset_key:
+            return
+        asset = self.pixel_assets.get(element.asset_key)
+        if asset is None:
+            QMessageBox.information(
+                self,
+                "Pixel asset unavailable",
+                "Open or rescan the Python file containing this pixel asset.",
+            )
+            return
+        blank = PixelArt(
+            asset.art.width,
+            asset.art.height,
+            asset.art.origin_x,
+            asset.art.origin_y,
+        )
+        element.asset_call = asset.function_name
+        element.asset_width = asset.art.width
+        element.asset_height = asset.art.height
+        element.asset_runs = [list(run) for run in asset.art.horizontal_runs(blank)]
+        self.session.mark_changed()
+
+    def _edit_selected_pixel_asset(self) -> None:
+        """Request the linked icon asset in the Pixel Art workspace."""
+        element = self._selected_element()
+        if element is not None and element.asset_key:
+            self.pixel_asset_edit_requested.emit(element.asset_key)
 
     def _drop_element(self, kind: str, x: int, y: int) -> None:
         """Add one palette element centered at a canvas drop point."""
@@ -2013,6 +2064,17 @@ class ScreenDesignerWidget(QWidget):
             and not element.editor_locked
         )
         self.property_group.setEnabled(single_editable)
+        linked_asset = bool(
+            single_editable
+            and element is not None
+            and element.kind == "icon"
+            and element.asset_key
+        )
+        asset_key = element.asset_key if element is not None else ""
+        self.refresh_pixel_asset_button.setEnabled(
+            linked_asset and asset_key in self.pixel_assets
+        )
+        self.edit_pixel_asset_button.setEnabled(linked_asset)
         self.delete_element_button.setEnabled(
             bool(selected) and not any(item.source_path for item in selected)
         )

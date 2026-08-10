@@ -161,6 +161,7 @@ class SourceTests(unittest.TestCase):
         ast.parse(patch.updated)
         self.assertIn("def draw_ship(draw, x, y, frame=0):", patch.updated)
         self.assertIn("_pico_graphic_size = (4, 4)", patch.updated)
+        self.assertIn("_pico_graphic_frames = (0, 1)", patch.updated)
         self.assertIn("if frame == 1:", patch.updated)
         self.assertEqual(patch.run_count, 2)
         backup = patch.apply(self.root / "backups")
@@ -168,9 +169,48 @@ class SourceTests(unittest.TestCase):
         generated = next(asset for asset in assets if asset.record.name == "draw_ship")
         trace = self.tracer.render(generated, {"frame": 1})
         self.assertIsNone(backup)
-        self.assertEqual(generated.variants["frame"], list(range(8)))
+        self.assertEqual(generated.variants["frame"], [0, 1])
         self.assertGreaterEqual(len(trace.primitives), 1)
         self.assertEqual((trace.current_art.width, trace.current_art.height), (4, 4))
+
+    def test_managed_graphic_rewrite_supports_transparency_and_resize(self) -> None:
+        """Rewrite managed pixels without source overlay restrictions."""
+        target = self.root / "managed.py"
+        original_art = PixelArt(4, 4)
+        original_art.set_pixel(1, 1, 0xF800)
+        build_new_graphic_patch(target, "draw_icon", [original_art]).apply(
+            self.root / "backups"
+        )
+        asset = self.scanner.scan_file(target)[0]
+        trace = self.tracer.render(asset)
+        edited = PixelArt(6, 5)
+        edited.set_pixel(4, 3, 0x07E0)
+        patch = SourceExporter().build_patch(asset, trace, edited)
+        ast.parse(patch.updated)
+        self.assertNotIn("# Pixel overlay", patch.updated)
+        self.assertNotIn("0xF800", patch.updated)
+        self.assertIn("_pico_graphic_size = (6, 5)", patch.updated)
+        patch.apply(self.root / "backups")
+        rescanned = self.scanner.scan_file(target)[0]
+        retraced = self.tracer.render(rescanned)
+        self.assertEqual(
+            (retraced.current_art.width, retraced.current_art.height), (6, 5)
+        )
+        self.assertIsNone(retraced.current_art.pixel(1, 1))
+        self.assertEqual(retraced.current_art.pixel(4, 3), 0x07E0)
+
+    def test_managed_animation_requires_every_frame(self) -> None:
+        """Refuse a partial rewrite of a managed animation."""
+        target = self.root / "managed_animation.py"
+        build_new_graphic_patch(
+            target,
+            "draw_walk",
+            [PixelArt(2, 2), PixelArt(2, 2)],
+        ).apply(self.root / "backups")
+        asset = self.scanner.scan_file(target)[0]
+        trace = self.tracer.render(asset, {"frame": 0})
+        with self.assertRaisesRegex(ValueError, "All managed animation frames"):
+            SourceExporter().build_patch(asset, trace, trace.current_art, {"frame": 0})
 
     def test_blank_new_graphic_is_discoverable_at_requested_size(self) -> None:
         """Discover an empty generated graphic without fake visible pixels."""

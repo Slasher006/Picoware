@@ -111,6 +111,7 @@ class DesignerUiTests(unittest.TestCase):
         element = session.current_screen().elements[0]
         self.assertEqual(element.kind, "icon")
         self.assertEqual(element.asset_call, "draw_badge")
+        self.assertEqual(element.asset_key, asset.key)
         self.assertEqual((element.asset_width, element.asset_height), (4, 3))
         self.assertEqual(
             element.asset_runs,
@@ -120,6 +121,23 @@ class DesignerUiTests(unittest.TestCase):
         self.assertEqual((element.x, element.y), (178, 139))
         self.assertEqual(widget.selected_element_id, element.id)
         self.assertTrue(event.isAccepted())
+        refreshed_art = PixelArt(4, 3)
+        refreshed_art.set_pixel(2, 1, 0x001F)
+        widget.upsert_pixel_asset(
+            GuiPixelAsset(
+                asset.key,
+                asset.name,
+                asset.source_path,
+                asset.function_name,
+                refreshed_art,
+            )
+        )
+        widget._refresh_selected_pixel_asset()
+        self.assertEqual(element.asset_runs, [[2, 1, 1, 0x001F]])
+        requested: list[str] = []
+        widget.pixel_asset_edit_requested.connect(requested.append)
+        widget._edit_selected_pixel_asset()
+        self.assertEqual(requested, [asset.key])
         widget.close()
 
     def test_custom_profile_changes_all_screen_sizes(self) -> None:

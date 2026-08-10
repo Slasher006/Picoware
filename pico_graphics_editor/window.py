@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +72,7 @@ from .source import (
     TraceInterpreter,
     TraceResult,
     build_new_graphic_patch,
+    is_managed_graphic,
 )
 
 
@@ -159,6 +163,7 @@ class NewGraphicDialog(QDialog):
         self,
         width: int,
         height: int,
+        has_reference: bool,
         imported_frame_count: int,
         parent: QWidget | None = None,
     ):
@@ -166,6 +171,18 @@ class NewGraphicDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Create new Python graphic")
         layout = QFormLayout(self)
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Blank transparent asset", "blank")
+        self.mode_combo.addItem("Current canvas pixels", "current")
+        if has_reference:
+            self.mode_combo.addItem("Current reference image", "reference")
+        self.mode_combo.addItem("Animation file or sprite sheet", "animation_file")
+        if imported_frame_count > 1:
+            self.mode_combo.addItem(
+                f"Current {imported_frame_count} imported frames",
+                "imported_frames",
+            )
+        layout.addRow("Create from", self.mode_combo)
         self.name_edit = QLineEdit("draw_new_graphic")
         layout.addRow("Function name", self.name_edit)
         self.width_spin = QSpinBox()
@@ -176,12 +193,6 @@ class NewGraphicDialog(QDialog):
         self.height_spin.setRange(1, 320)
         self.height_spin.setValue(min(320, max(1, height)))
         layout.addRow("Height", self.height_spin)
-        self.use_frames_check = QCheckBox(
-            f"Create animation from {imported_frame_count} imported frames"
-        )
-        self.use_frames_check.setEnabled(imported_frame_count > 1)
-        self.use_frames_check.setChecked(imported_frame_count > 1)
-        layout.addRow(self.use_frames_check)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -189,13 +200,55 @@ class NewGraphicDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
 
-    def settings(self) -> tuple[str, int, int, bool]:
-        """Return function name, dimensions, and animation choice."""
+    def settings(self) -> tuple[str, int, int, str]:
+        """Return function name, dimensions, and creation mode."""
         return (
             self.name_edit.text().strip(),
             self.width_spin.value(),
             self.height_spin.value(),
-            self.use_frames_check.isChecked(),
+            str(self.mode_combo.currentData()),
+        )
+
+
+class PixelSizeDialog(QDialog):
+    """Collect target dimensions for a pixel canvas operation."""
+
+    def __init__(
+        self,
+        title: str,
+        width: int,
+        height: int,
+        allow_centering: bool,
+        parent: QWidget | None = None,
+    ):
+        """Build pixel dimensions and optional centering controls."""
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        layout = QFormLayout(self)
+        self.width_spin = QSpinBox()
+        self.width_spin.setRange(1, 320)
+        self.width_spin.setValue(width)
+        layout.addRow("Width", self.width_spin)
+        self.height_spin = QSpinBox()
+        self.height_spin.setRange(1, 320)
+        self.height_spin.setValue(height)
+        layout.addRow("Height", self.height_spin)
+        self.center_check = QCheckBox("Center existing pixels")
+        self.center_check.setVisible(allow_centering)
+        layout.addRow(self.center_check)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def settings(self) -> tuple[int, int, bool]:
+        """Return target width, height, and centering choice."""
+        return (
+            self.width_spin.value(),
+            self.height_spin.value(),
+            self.center_check.isChecked(),
         )
 
 
@@ -352,9 +405,13 @@ class MainWindow(QMainWindow):
         self.designer_recovery_timer = QTimer(self)
         self.designer_recovery_timer.setSingleShot(True)
         self.designer_recovery_timer.setInterval(800)
+        self.pixel_recovery_timer = QTimer(self)
+        self.pixel_recovery_timer.setSingleShot(True)
+        self.pixel_recovery_timer.setInterval(800)
         self.animation_asset_key: tuple[Path, str] | None = None
         self.animation_images: dict[Any, QImage] = {}
         self.animation_drafts: dict[Any, PixelArt] = {}
+        self._animation_structure_dirty = False
         self._scan_path: Path | None = None
         self._scan_folder = False
         self._dirty = False
@@ -370,6 +427,7 @@ class MainWindow(QMainWindow):
         self._set_background(self._background_color)
         self._update_recovery_action()
         self._update_history_actions()
+        self._update_pixel_action_state()
 
     def open_path(self, path: str | Path) -> None:
         """Open a Python file or source folder."""
@@ -415,6 +473,28 @@ class MainWindow(QMainWindow):
         self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
         self.redo_action = QAction("Redo", self)
         self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        self.cut_pixels_action = QAction("Cut Pixels", self)
+        self.cut_pixels_action.setShortcut(QKeySequence.StandardKey.Cut)
+        self.copy_pixels_action = QAction("Copy Pixels", self)
+        self.copy_pixels_action.setShortcut(QKeySequence.StandardKey.Copy)
+        self.paste_pixels_action = QAction("Paste Pixels", self)
+        self.paste_pixels_action.setShortcut(QKeySequence.StandardKey.Paste)
+        self.select_all_pixels_action = QAction("Select All Pixels", self)
+        self.select_all_pixels_action.setShortcut(QKeySequence.StandardKey.SelectAll)
+        self.delete_pixels_action = QAction("Delete Selected Pixels", self)
+        self.delete_pixels_action.setShortcut(QKeySequence("Delete"))
+        self.clear_selection_action = QAction("Clear Selection", self)
+        self.clear_selection_action.setShortcut(QKeySequence("Escape"))
+        self.flip_horizontal_action = QAction("Flip Horizontally", self)
+        self.flip_vertical_action = QAction("Flip Vertically", self)
+        self.rotate_clockwise_action = QAction("Rotate 90° Clockwise", self)
+        self.crop_selection_action = QAction("Crop to Selection", self)
+        self.resize_canvas_action = QAction("Resize Canvas...", self)
+        self.scale_artwork_action = QAction("Scale Artwork...", self)
+        self.clear_canvas_action = QAction("Clear Canvas...", self)
+        self.use_in_gui_action = QAction("Use in App GUI", self)
+        self.use_in_gui_action.setEnabled(False)
+        self.recover_pixel_action = QAction("Recover Autosaved Pixel Asset...", self)
         self.recover_gui_action = QAction("Recover Autosaved GUI Project...", self)
         self.open_reference_action = QAction("Open Reference Image...", self)
         self.clear_reference_action = QAction("Clear Reference Image", self)
@@ -445,6 +525,36 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.quit_action)
         edit_menu = self.menuBar().addMenu("Edit")
         edit_menu.addActions((self.undo_action, self.redo_action))
+        edit_menu.addSeparator()
+        edit_menu.addActions(
+            (
+                self.cut_pixels_action,
+                self.copy_pixels_action,
+                self.paste_pixels_action,
+                self.delete_pixels_action,
+                self.select_all_pixels_action,
+                self.clear_selection_action,
+            )
+        )
+        pixel_menu = self.menuBar().addMenu("Pixel Art")
+        pixel_menu.addActions(
+            (
+                self.flip_horizontal_action,
+                self.flip_vertical_action,
+                self.rotate_clockwise_action,
+                self.crop_selection_action,
+            )
+        )
+        pixel_menu.addSeparator()
+        pixel_menu.addActions(
+            (
+                self.resize_canvas_action,
+                self.scale_artwork_action,
+                self.clear_canvas_action,
+            )
+        )
+        pixel_menu.addSeparator()
+        pixel_menu.addActions((self.use_in_gui_action, self.recover_pixel_action))
         reference_menu = self.menuBar().addMenu("Reference")
         reference_menu.addActions(
             (
@@ -476,10 +586,12 @@ class MainWindow(QMainWindow):
         self.tool_bar.setMovable(False)
         self.addToolBar(self.tool_bar)
         self.tool_bar.addAction(self.new_graphic_action)
+        self.tool_bar.addAction(self.use_in_gui_action)
         self.tool_bar.addSeparator()
         self.tool_group = QActionGroup(self)
         self.tool_group.setExclusive(True)
         tool_specs = (
+            ("Select", "select", "S"),
             ("Pencil", "pencil", "P"),
             ("Eraser", "eraser", "E"),
             ("Fill", "fill", "F"),
@@ -590,6 +702,9 @@ class MainWindow(QMainWindow):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         layout.addWidget(self.source_label)
+        self.asset_mode_label = QLabel("No asset selected")
+        self.asset_mode_label.setWordWrap(True)
+        layout.addWidget(self.asset_mode_label)
 
         self.variant_group = QGroupBox("Variants")
         self.variant_form = QFormLayout(self.variant_group)
@@ -696,6 +811,50 @@ class MainWindow(QMainWindow):
         reference_layout.addWidget(self.new_graphic_button)
         layout.addWidget(reference_group)
 
+        selection_group = QGroupBox("Selection and canvas")
+        selection_layout = QGridLayout(selection_group)
+        selection_actions = (
+            self.select_all_pixels_action,
+            self.clear_selection_action,
+            self.cut_pixels_action,
+            self.copy_pixels_action,
+            self.paste_pixels_action,
+            self.delete_pixels_action,
+            self.flip_horizontal_action,
+            self.flip_vertical_action,
+            self.rotate_clockwise_action,
+            self.crop_selection_action,
+            self.resize_canvas_action,
+            self.scale_artwork_action,
+        )
+        for index, action in enumerate(selection_actions):
+            button = QPushButton(action.text().replace("...", ""))
+            button.setEnabled(action.isEnabled())
+            button.clicked.connect(action.trigger)
+            action.changed.connect(
+                lambda selected_action=action,
+                selected_button=button: selected_button.setEnabled(
+                    selected_action.isEnabled()
+                )
+            )
+            selection_layout.addWidget(button, index // 2, index % 2)
+        self.clear_canvas_button = QPushButton("Clear canvas")
+        self.clear_canvas_button.setEnabled(self.clear_canvas_action.isEnabled())
+        self.clear_canvas_button.clicked.connect(self.clear_canvas_action.trigger)
+        self.clear_canvas_action.changed.connect(
+            lambda: self.clear_canvas_button.setEnabled(
+                self.clear_canvas_action.isEnabled()
+            )
+        )
+        selection_layout.addWidget(
+            self.clear_canvas_button,
+            len(selection_actions) // 2,
+            0,
+            1,
+            2,
+        )
+        layout.addWidget(selection_group)
+
         palette_group = QGroupBox("RGB565 palette")
         palette_layout = QVBoxLayout(palette_group)
         self.color_label = QLabel("Paint 0xFFFF   Erase 0x0000")
@@ -733,6 +892,9 @@ class MainWindow(QMainWindow):
         self.export_button = QPushButton("Export PNG")
         self.export_button.setEnabled(False)
         layout.addWidget(self.export_button)
+        self.use_in_gui_button = QPushButton("Use in App GUI")
+        self.use_in_gui_button.setEnabled(False)
+        layout.addWidget(self.use_in_gui_button)
         layout.addStretch(1)
         scroll.setWidget(panel)
         return scroll
@@ -748,6 +910,38 @@ class MainWindow(QMainWindow):
         self.undo_action.triggered.connect(self._undo_current)
         self.redo_action.triggered.connect(self._redo_current)
         self.tool_group.triggered.connect(self._tool_changed)
+        self.cut_pixels_action.triggered.connect(self._cut_pixels)
+        self.copy_pixels_action.triggered.connect(self._copy_pixels)
+        self.paste_pixels_action.triggered.connect(self._paste_pixels)
+        self.delete_pixels_action.triggered.connect(self._delete_pixels)
+        self.select_all_pixels_action.triggered.connect(self.canvas.select_all)
+        self.clear_selection_action.triggered.connect(self.canvas.clear_selection)
+        self.flip_horizontal_action.triggered.connect(
+            lambda: self.canvas.flip_selection(True)
+        )
+        self.flip_vertical_action.triggered.connect(
+            lambda: self.canvas.flip_selection(False)
+        )
+        self.rotate_clockwise_action.triggered.connect(
+            self.canvas.rotate_selection_clockwise
+        )
+        self.crop_selection_action.triggered.connect(self._crop_pixel_selection)
+        self.resize_canvas_action.triggered.connect(self._resize_pixel_canvas)
+        self.scale_artwork_action.triggered.connect(self._scale_pixel_artwork)
+        self.clear_canvas_action.triggered.connect(self._clear_pixel_canvas)
+        self.use_in_gui_action.triggered.connect(self._use_current_asset_in_gui)
+        self.recover_pixel_action.triggered.connect(self._recover_pixel_asset)
+        self.use_in_gui_button.clicked.connect(self.use_in_gui_action.trigger)
+        self.canvas.addActions(
+            (
+                self.cut_pixels_action,
+                self.copy_pixels_action,
+                self.paste_pixels_action,
+                self.delete_pixels_action,
+                self.select_all_pixels_action,
+                self.clear_selection_action,
+            )
+        )
         self.primary_button.clicked.connect(self._choose_primary_color)
         self.background_button.clicked.connect(self._choose_background_color)
         self.zoom_spin.valueChanged.connect(self.canvas.set_zoom)
@@ -757,6 +951,7 @@ class MainWindow(QMainWindow):
         self.asset_list.currentRowChanged.connect(self._select_asset)
         self.canvas.color_picked.connect(self._set_color)
         self.canvas.document_changed.connect(self._canvas_changed)
+        self.canvas.selection_changed.connect(self._pixel_selection_changed)
         self.canvas.cursor_changed.connect(self._cursor_changed)
         self.apply_button.clicked.connect(self._apply_to_source)
         self.export_button.clicked.connect(self._export_png)
@@ -813,6 +1008,9 @@ class MainWindow(QMainWindow):
         self.apply_imported_app_action.triggered.connect(self._apply_imported_app_edits)
         self.workspace_tabs.currentChanged.connect(self._workspace_changed)
         self.screen_flow.open_screen_requested.connect(self._open_designed_screen)
+        self.screen_designer.pixel_asset_edit_requested.connect(
+            self._edit_gui_pixel_asset
+        )
         self.designer_session.dirty_changed.connect(self._designer_dirty_changed)
         self.designer_session.dirty_changed.connect(self._schedule_designer_recovery)
         self.designer_session.project_changed.connect(self._update_import_actions)
@@ -820,6 +1018,7 @@ class MainWindow(QMainWindow):
         self.designer_session.history_changed.connect(self._update_history_actions)
         self.designer_session.history_changed.connect(self._schedule_designer_recovery)
         self.designer_recovery_timer.timeout.connect(self._write_designer_recovery)
+        self.pixel_recovery_timer.timeout.connect(self._write_pixel_recovery)
 
     def _open_file(self) -> None:
         """Prompt for one Python source file."""
@@ -974,12 +1173,13 @@ class MainWindow(QMainWindow):
         dialog = NewGraphicDialog(
             current.width,
             current.height,
+            self.canvas.has_reference_image(),
             len(self.animation_images),
             self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        function_name, width, height, use_frames = dialog.settings()
+        function_name, width, height, creation_mode = dialog.settings()
         if not function_name:
             QMessageBox.information(
                 self, "Function name required", "Enter a Python function name."
@@ -995,35 +1195,13 @@ class MainWindow(QMainWindow):
             return
         if not filename.endswith(".py"):
             filename += ".py"
-        images: list[QImage]
-        if use_frames and self.animation_images:
-            images = list(self.animation_images.values())
+        if creation_mode == "blank":
+            frames = [PixelArt(width, height)]
         else:
-            reference = self.canvas.reference_source_image()
-            images = [reference if reference is not None else pixel_art_image(current)]
-        frames: list[PixelArt] = []
-        for image in images:
-            prepared = prepare_reference_image(
-                image,
-                width,
-                height,
-                str(self.reference_fit_combo.currentData()),
-                int(self.reference_rotation_combo.currentData()),
-                self.reference_flip_horizontal.isChecked(),
-                self.reference_flip_vertical.isChecked(),
-                self.reference_scale_spin.value(),
-                self.reference_x_spin.value(),
-                self.reference_y_spin.value(),
-            )
-            frames.append(
-                image_to_pixel_art(
-                    prepared,
-                    width,
-                    height,
-                    self.reference_colors_spin.value(),
-                    self.reference_dither_check.isChecked(),
-                )
-            )
+            images = self._new_graphic_images(creation_mode, width, height)
+            if not images:
+                return
+            frames = self._convert_new_graphic_images(images, width, height)
         try:
             patch = build_new_graphic_patch(filename, function_name, frames)
         except (OSError, SyntaxError, ValueError) as error:
@@ -1050,6 +1228,70 @@ class MainWindow(QMainWindow):
             "Graphic created",
             f"Updated {patch.path}.\n{detail}\n{next_step}",
         )
+
+    def _new_graphic_images(
+        self, creation_mode: str, width: int, height: int
+    ) -> list[QImage]:
+        """Return source images for one explicit new-asset mode."""
+        if creation_mode == "current":
+            return [pixel_art_image(self.canvas.art())]
+        if creation_mode == "reference":
+            reference = self.canvas.reference_source_image()
+            return [reference] if reference is not None else []
+        if creation_mode == "imported_frames":
+            return [image.copy() for image in self.animation_images.values()]
+        if creation_mode != "animation_file":
+            return []
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose animation or sprite sheet",
+            str(Path.cwd()),
+            "Images (*.gif *.webp *.png *.bmp *.jpg *.jpeg)",
+        )
+        if not filename:
+            return []
+        images = read_image_frames(filename)
+        if len(images) == 1:
+            sheet_dialog = SpriteSheetDialog(images[0], width, height, self)
+            if sheet_dialog.exec() != QDialog.DialogCode.Accepted:
+                return []
+            images = split_sprite_sheet(images[0], *sheet_dialog.settings())
+        if not images:
+            QMessageBox.warning(
+                self,
+                "No animation frames",
+                "The selected file produced no animation frames.",
+            )
+        return images
+
+    def _convert_new_graphic_images(
+        self, images: list[QImage], width: int, height: int
+    ) -> list[PixelArt]:
+        """Convert new-asset source images into RGB565 frames."""
+        frames: list[PixelArt] = []
+        for image in images:
+            prepared = prepare_reference_image(
+                image,
+                width,
+                height,
+                str(self.reference_fit_combo.currentData()),
+                int(self.reference_rotation_combo.currentData()),
+                self.reference_flip_horizontal.isChecked(),
+                self.reference_flip_vertical.isChecked(),
+                self.reference_scale_spin.value(),
+                self.reference_x_spin.value(),
+                self.reference_y_spin.value(),
+            )
+            frames.append(
+                image_to_pixel_art(
+                    prepared,
+                    width,
+                    height,
+                    self.reference_colors_spin.value(),
+                    self.reference_dither_check.isChecked(),
+                )
+            )
+        return frames
 
     def _open_created_graphic(self, path: Path, patch_key: str) -> bool:
         """Scan and select the newly written pixel graphic function."""
@@ -1250,6 +1492,146 @@ class MainWindow(QMainWindow):
             / "last-gui-session.picogui.json"
         )
 
+    def _pixel_recovery_path(self) -> Path:
+        """Return the autosaved pixel draft recovery path."""
+        return (
+            Path(
+                QStandardPaths.writableLocation(
+                    QStandardPaths.StandardLocation.AppDataLocation
+                )
+            )
+            / "recovery"
+            / "last-pixel-session.json"
+        )
+
+    def _schedule_pixel_recovery(self) -> None:
+        """Debounce recovery writes for a dirty pixel asset."""
+        if self._dirty:
+            self.pixel_recovery_timer.start()
+
+    def _write_pixel_recovery(self) -> None:
+        """Atomically write the current dirty pixel asset draft."""
+        if not self._dirty or self.current_asset is None:
+            return
+        art = self.canvas.art()
+        payload = {
+            "format_version": 1,
+            "source_path": str(self.current_asset.document.path.resolve()),
+            "qualified_name": self.current_asset.record.qualified_name,
+            "variants": self.variant_values,
+            "width": art.width,
+            "height": art.height,
+            "origin_x": art.origin_x,
+            "origin_y": art.origin_y,
+            "pixels": art.pixels,
+        }
+        target = self._pixel_recovery_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent, text=True
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
+                json.dump(payload, temporary, indent=2)
+                temporary.write("\n")
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_name, target)
+        except OSError as error:
+            try:
+                Path(temporary_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.statusBar().showMessage(f"Pixel recovery failed: {error}")
+            return
+        self._update_recovery_action()
+
+    def _recover_pixel_asset(self) -> None:
+        """Restore the most recent autosaved pixel asset draft."""
+        recovery_path = self._pixel_recovery_path()
+        try:
+            payload = json.loads(recovery_path.read_text(encoding="utf-8"))
+            source_path = Path(str(payload["source_path"])).resolve()
+            qualified_name = str(payload["qualified_name"])
+            width = int(payload["width"])
+            height = int(payload["height"])
+            pixels = payload["pixels"]
+            if not source_path.is_file():
+                raise ValueError("The recovered source file no longer exists")
+            if not 1 <= width <= 320 or not 1 <= height <= 320:
+                raise ValueError("Recovered pixel dimensions are invalid")
+            if not isinstance(pixels, list) or len(pixels) != width * height:
+                raise ValueError("Recovered pixel data is invalid")
+            normalized_pixels = [
+                None if value is None else int(value) & 0xFFFF for value in pixels
+            ]
+        except (
+            OSError,
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as error:
+            QMessageBox.critical(self, "Cannot recover pixel asset", str(error))
+            self._update_recovery_action()
+            return
+        if not self._confirm_discard():
+            return
+        self._scan_path = source_path
+        self._scan_folder = False
+        self._scan(source_path, False)
+        row = next(
+            (
+                index
+                for index, asset in enumerate(self.assets)
+                if asset.record.qualified_name == qualified_name
+            ),
+            None,
+        )
+        if row is None:
+            QMessageBox.critical(
+                self,
+                "Cannot recover pixel asset",
+                "The recovered graphic function was not discovered.",
+            )
+            return
+        self.asset_list.setCurrentRow(row)
+        variants = payload.get("variants", {})
+        if isinstance(variants, dict):
+            for name, value in variants.items():
+                if name == self.animation_parameter:
+                    index = self.frame_combo.findData(value)
+                    if index >= 0:
+                        self.frame_combo.setCurrentIndex(index)
+                elif name in self.variant_controls:
+                    index = self.variant_controls[name].findData(value)
+                    if index >= 0:
+                        self.variant_controls[name].setCurrentIndex(index)
+        recovered = PixelArt(
+            width,
+            height,
+            int(payload.get("origin_x", 0)),
+            int(payload.get("origin_y", 0)),
+            normalized_pixels,
+        )
+        self._suppress_changes = True
+        self.canvas.set_art(recovered)
+        self._suppress_changes = False
+        self._dirty = True
+        self._update_preview()
+        self._update_apply_state()
+        self.workspace_tabs.setCurrentIndex(0)
+        self.statusBar().showMessage(f"Recovered unsaved pixel asset: {source_path}")
+
+    def _clear_pixel_recovery(self) -> None:
+        """Remove pixel recovery after saving or explicit discard."""
+        self.pixel_recovery_timer.stop()
+        try:
+            self._pixel_recovery_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+        self._update_recovery_action()
+
     def _schedule_designer_recovery(self, *args: object) -> None:
         """Debounce recovery writes for a dirty GUI project."""
         if self.designer_session.dirty:
@@ -1318,6 +1700,7 @@ class MainWindow(QMainWindow):
     def _update_recovery_action(self) -> None:
         """Enable recovery only when an autosave is available."""
         self.recover_gui_action.setEnabled(self._designer_recovery_path().is_file())
+        self.recover_pixel_action.setEnabled(self._pixel_recovery_path().is_file())
 
     def _import_existing_app(self) -> None:
         """Scan an existing Python app into source-backed GUI screens."""
@@ -1525,6 +1908,7 @@ class MainWindow(QMainWindow):
         self.current_asset = None
         self.current_trace = None
         self._dirty = False
+        self._animation_structure_dirty = False
         self.asset_list.clear()
         for index, asset in enumerate(assets):
             item = QListWidgetItem()
@@ -1636,6 +2020,18 @@ class MainWindow(QMainWindow):
             self.animation_images.clear()
             self.animation_drafts.clear()
         self.current_asset = asset
+        managed = is_managed_graphic(asset)
+        self.canvas.set_transparent_eraser(managed)
+        if managed:
+            self.asset_mode_label.setText(
+                "Managed asset: fully editable, including transparency and canvas size."
+            )
+            self.asset_mode_label.setStyleSheet("color: #2e7d32; font-weight: 600;")
+        else:
+            self.asset_mode_label.setText(
+                "Source-backed asset: drawing overlays are safe; transparent deletion and resizing are disabled."
+            )
+            self.asset_mode_label.setStyleSheet("color: #ef6c00; font-weight: 600;")
         self.variant_values = {
             name: asset.parameters.get(name, values[0] if values else 0)
             for name, values in asset.variants.items()
@@ -1648,6 +2044,7 @@ class MainWindow(QMainWindow):
         )
         self.export_button.setEnabled(True)
         self.export_action.setEnabled(True)
+        self._update_pixel_action_state()
 
     def _rebuild_variants(self, asset: GraphicsAsset) -> None:
         """Rebuild controls for inferred renderer variants."""
@@ -1786,6 +2183,8 @@ class MainWindow(QMainWindow):
         )
         self._refresh_animation_labels()
         self.frame_combo.setCurrentIndex(self.frame_combo.count() - 1)
+        if self._current_asset_is_managed():
+            self._mark_animation_structure_changed()
 
     def _duplicate_animation_frame(self) -> None:
         """Duplicate the current animation frame into a new value."""
@@ -1801,6 +2200,8 @@ class MainWindow(QMainWindow):
         )
         self._refresh_animation_labels()
         self.frame_combo.setCurrentIndex(self.frame_combo.count() - 1)
+        if self._current_asset_is_managed():
+            self._mark_animation_structure_changed()
 
     def _delete_animation_frame(self) -> None:
         """Remove one imported or newly added animation frame."""
@@ -1809,7 +2210,7 @@ class MainWindow(QMainWindow):
         if self._dirty and not self._confirm_discard():
             return
         value = self.frame_combo.currentData()
-        if value not in self.animation_images:
+        if value not in self.animation_images and not self._current_asset_is_managed():
             QMessageBox.information(
                 self,
                 "Source frame retained",
@@ -1821,6 +2222,8 @@ class MainWindow(QMainWindow):
         self.animation_drafts.pop(value, None)
         self.frame_combo.removeItem(index)
         self.frame_combo.setCurrentIndex(min(index, self.frame_combo.count() - 1))
+        if self._current_asset_is_managed():
+            self._mark_animation_structure_changed()
 
     def _move_animation_frame(self, direction: int) -> None:
         """Move the current frame within preview playback order."""
@@ -1835,6 +2238,15 @@ class MainWindow(QMainWindow):
         self.frame_combo.insertItem(target, text, value)
         self.frame_combo.setCurrentIndex(target)
         self.frame_combo.blockSignals(False)
+        if self._current_asset_is_managed():
+            self._mark_animation_structure_changed()
+
+    def _mark_animation_structure_changed(self) -> None:
+        """Mark managed frame additions, deletions, or ordering as unsaved."""
+        self._animation_structure_dirty = True
+        self._dirty = True
+        self._update_apply_state()
+        self._schedule_pixel_recovery()
 
     def _next_animation_value(self) -> int:
         """Return the next numeric frame or timing value."""
@@ -1929,7 +2341,7 @@ class MainWindow(QMainWindow):
         self.canvas.set_art(displayed_art)
         self._suppress_changes = False
         self._update_onion_skin()
-        self._dirty = False
+        self._dirty = self._animation_structure_dirty
         self._update_palette(trace.current_art)
         self._update_preview()
         notes = trace.warnings[:20]
@@ -1950,7 +2362,7 @@ class MainWindow(QMainWindow):
         if self._suppress_changes or self.current_trace is None:
             return
         try:
-            self._dirty = bool(
+            self._dirty = self._animation_structure_dirty or bool(
                 self.canvas.art().changed_pixels(self.current_trace.current_art)
             )
         except ValueError:
@@ -1961,6 +2373,7 @@ class MainWindow(QMainWindow):
                 self.animation_drafts[frame_value] = self.canvas.art().copy()
         self._update_preview()
         self._update_apply_state()
+        self._schedule_pixel_recovery()
 
     def _update_apply_state(self) -> None:
         """Enable source applying when an edit exists."""
@@ -1971,6 +2384,13 @@ class MainWindow(QMainWindow):
         )
         self.apply_button.setEnabled(enabled)
         self.apply_action.setEnabled(enabled)
+        apply_text = (
+            "Review and save managed asset"
+            if self._current_asset_is_managed()
+            else "Review and apply to Python"
+        )
+        self.apply_button.setText(apply_text)
+        self.apply_action.setText(apply_text + "...")
         title = "Pico Graphics and GUI Designer"
         if self.current_asset is not None:
             title += f" - {self.current_asset.record.name}"
@@ -1991,6 +2411,152 @@ class MainWindow(QMainWindow):
         self.preview_label.setToolTip(
             f"{art.width} x {art.height}, origin {art.origin_x}, {art.origin_y}"
         )
+
+    def _current_asset_is_managed(self) -> bool:
+        """Return whether the selected asset is fully editor-managed."""
+        return self.current_asset is not None and is_managed_graphic(self.current_asset)
+
+    def _pixel_selection_changed(self, selected: bool) -> None:
+        """Update pixel editing controls for selection availability."""
+        self._update_pixel_action_state()
+
+    def _update_pixel_action_state(self) -> None:
+        """Enable pixel operations supported by the active asset mode."""
+        available = self.current_asset is not None
+        selected = self.canvas.selection() is not None
+        managed = self._current_asset_is_managed()
+        self.select_all_pixels_action.setEnabled(available)
+        self.clear_selection_action.setEnabled(selected)
+        self.copy_pixels_action.setEnabled(selected)
+        for action in (
+            self.cut_pixels_action,
+            self.delete_pixels_action,
+            self.flip_horizontal_action,
+            self.flip_vertical_action,
+            self.rotate_clockwise_action,
+            self.crop_selection_action,
+        ):
+            action.setEnabled(managed and selected)
+        self.paste_pixels_action.setEnabled(managed and self.canvas.has_clipboard())
+        dimensions_editable = managed and self.animation_parameter is None
+        self.resize_canvas_action.setEnabled(dimensions_editable)
+        self.scale_artwork_action.setEnabled(dimensions_editable)
+        self.clear_canvas_action.setEnabled(managed)
+        self.use_in_gui_action.setEnabled(available)
+        self.use_in_gui_button.setEnabled(available)
+
+    def _copy_pixels(self) -> None:
+        """Copy the current pixel selection."""
+        if self.canvas.copy_selection():
+            self.statusBar().showMessage("Copied selected pixels.")
+        self._update_pixel_action_state()
+
+    def _cut_pixels(self) -> None:
+        """Cut selected pixels from a managed asset."""
+        if self._current_asset_is_managed() and self.canvas.cut_selection():
+            self.statusBar().showMessage("Cut selected pixels.")
+        self._update_pixel_action_state()
+
+    def _paste_pixels(self) -> None:
+        """Paste pixels into a managed asset."""
+        if self._current_asset_is_managed() and self.canvas.paste_selection():
+            self.statusBar().showMessage("Pasted pixels.")
+        self._update_pixel_action_state()
+
+    def _delete_pixels(self) -> None:
+        """Clear selected managed-asset pixels to transparency."""
+        if self._current_asset_is_managed() and self.canvas.delete_selection():
+            self.statusBar().showMessage("Cleared selected pixels.")
+
+    def _crop_pixel_selection(self) -> None:
+        """Crop a managed asset to its selected pixels."""
+        if self._current_asset_is_managed() and self.canvas.crop_to_selection():
+            self.statusBar().showMessage("Cropped managed asset to selection.")
+
+    def _resize_pixel_canvas(self) -> None:
+        """Resize a managed asset canvas without scaling its pixels."""
+        if not self._current_asset_is_managed():
+            return
+        art = self.canvas.art()
+        dialog = PixelSizeDialog(
+            "Resize pixel canvas", art.width, art.height, True, self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        width, height, center = dialog.settings()
+        self.canvas.resize_canvas(width, height, center)
+
+    def _scale_pixel_artwork(self) -> None:
+        """Scale a managed asset using nearest-neighbor pixels."""
+        if not self._current_asset_is_managed():
+            return
+        art = self.canvas.art()
+        dialog = PixelSizeDialog(
+            "Scale pixel artwork", art.width, art.height, False, self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        width, height, unused = dialog.settings()
+        self.canvas.scale_artwork(width, height)
+
+    def _clear_pixel_canvas(self) -> None:
+        """Clear a managed asset after confirmation."""
+        if not self._current_asset_is_managed():
+            return
+        answer = QMessageBox.question(
+            self,
+            "Clear pixel canvas?",
+            "Clear every pixel to transparency? This can be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.canvas.clear_art()
+
+    def _use_current_asset_in_gui(self) -> None:
+        """Select the current pixel asset in the App GUI workspace."""
+        if self.current_asset is None:
+            return
+        key = self._publish_gui_pixel_asset(self.current_asset, self.canvas.art())
+        self.workspace_tabs.setCurrentIndex(1)
+        self.screen_designer.select_pixel_asset(key)
+        self.statusBar().showMessage(
+            "Pixel asset selected in App GUI. Drag it onto the active screen."
+        )
+
+    def _edit_gui_pixel_asset(self, key: str) -> None:
+        """Open a linked GUI icon in the Pixel Art workspace."""
+        source_text, separator, qualified_name = key.rpartition("::")
+        source_path = Path(source_text)
+        if not separator or not source_path.is_file():
+            QMessageBox.information(
+                self,
+                "Pixel asset unavailable",
+                "The linked Python source file is not available.",
+            )
+            return
+        if not self._confirm_discard():
+            return
+        self._scan_path = source_path.resolve()
+        self._scan_folder = False
+        self._scan(self._scan_path, False)
+        row = next(
+            (
+                index
+                for index, asset in enumerate(self.assets)
+                if asset.record.qualified_name == qualified_name
+            ),
+            None,
+        )
+        if row is None:
+            QMessageBox.information(
+                self,
+                "Pixel asset unavailable",
+                "The linked graphic function was not discovered in its source file.",
+            )
+            return
+        self.asset_list.setCurrentRow(row)
+        self.workspace_tabs.setCurrentIndex(0)
 
     def _update_palette(self, art: PixelArt) -> None:
         """Populate palette buttons from current graphic colors."""
@@ -2082,47 +2648,50 @@ class MainWindow(QMainWindow):
             f"Pixel {x}, {y}   Source {source_x}, {source_y}   {color_text}"
         )
 
-    def _apply_to_source(self) -> None:
+    def _apply_to_source(self) -> bool:
         """Review, back up, and apply edited pixels."""
         if not self._dirty or self.current_asset is None or self.current_trace is None:
-            return
+            return False
         try:
             disk_source = self.current_asset.document.path.read_text(encoding="utf-8")
         except OSError as error:
             QMessageBox.critical(self, "Cannot read source", str(error))
-            return
+            return False
         if disk_source != self.current_asset.document.source:
             QMessageBox.warning(
                 self,
                 "Source changed",
                 "The Python file changed after scanning. Rescan before applying edits.",
             )
-            return
+            return False
         try:
             patch = self.exporter.build_patch(
                 self.current_asset,
                 self.current_trace,
                 self.canvas.art(),
                 self.variant_values,
+                self._managed_frames_for_save(),
             )
         except (OSError, ValueError) as error:
             QMessageBox.warning(self, "Cannot build patch", str(error))
-            return
+            return False
         if not patch.diff:
             QMessageBox.information(
                 self, "No changes", "The edited pixels match the source rendering."
             )
-            return
+            return False
         dialog = DiffDialog(patch, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
+            return False
         backup_root = self._source_backup_root()
         try:
             backup_path = patch.apply(backup_root)
         except Exception as error:
             QMessageBox.critical(self, "Apply failed", str(error))
-            return
+            return False
         self._dirty = False
+        self._animation_structure_dirty = False
+        self._clear_pixel_recovery()
         QMessageBox.information(
             self,
             "Python updated",
@@ -2133,6 +2702,30 @@ class MainWindow(QMainWindow):
             ),
         )
         self._scan(self._scan_path or patch.path, self._scan_folder)
+        return True
+
+    def _managed_frames_for_save(self) -> list[PixelArt] | None:
+        """Return every managed frame with the current edit included."""
+        if not self._current_asset_is_managed():
+            return None
+        if self.animation_parameter != "frame":
+            return [self.canvas.art().copy()]
+        current_value = self.variant_values.get("frame")
+        frames: list[PixelArt] = []
+        for index in range(self.frame_combo.count()):
+            value = self.frame_combo.itemData(index)
+            if value == current_value:
+                frames.append(self.canvas.art().copy())
+                continue
+            draft = self.animation_drafts.get(value)
+            if draft is not None:
+                frames.append(draft.copy())
+                continue
+            values = dict(self.variant_values)
+            values["frame"] = value
+            trace = self.tracer.render(self.current_asset, values)
+            frames.append(self._animation_art(trace, value).copy())
+        return frames
 
     def _export_png(self) -> None:
         """Export the current pixel art as PNG."""
@@ -2157,18 +2750,31 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Exported {filename}")
 
     def _confirm_discard(self) -> bool:
-        """Confirm discarding an unapplied pixel edit."""
+        """Offer save, discard, or cancel for an unapplied pixel edit."""
         if not self._dirty:
             return True
         answer = QMessageBox.question(
             self,
-            "Discard pixel edits?",
-            "The current pixel edits have not been applied to Python. Discard them?",
-            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
+            "Save pixel edits?",
+            "The current pixel asset has unsaved changes.",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
         )
+        if answer == QMessageBox.StandardButton.Save:
+            return self._apply_to_source()
         if answer == QMessageBox.StandardButton.Discard:
             self._dirty = False
+            if self._animation_structure_dirty:
+                self._animation_structure_dirty = False
+                self.animation_asset_key = None
+                self.animation_images.clear()
+                self.animation_drafts.clear()
+                if self.current_asset is not None:
+                    self._rebuild_variants(self.current_asset)
+                    self._render_current()
+            self._clear_pixel_recovery()
             return True
         return False
 
@@ -2183,11 +2789,15 @@ class MainWindow(QMainWindow):
         self._suppress_changes = False
         self.asset_title.setText("No graphic selected")
         self.source_label.setText("No source selected")
+        self.asset_mode_label.setText("No asset selected")
+        self.asset_mode_label.setStyleSheet("")
         self.warning_text.setPlainText("No supported drawing functions were found.")
         self.apply_button.setEnabled(False)
         self.export_button.setEnabled(False)
         self.apply_action.setEnabled(False)
         self.export_action.setEnabled(False)
+        self.canvas.set_transparent_eraser(False)
+        self._update_pixel_action_state()
 
     def _animation_art(self, trace: TraceResult, value: Any = None) -> PixelArt:
         """Return an imported or source-rendered animation frame."""
@@ -2236,18 +2846,20 @@ class MainWindow(QMainWindow):
             return None
         return asset.document.path, asset.record.qualified_name
 
-    def _publish_gui_pixel_asset(self, asset: GraphicsAsset, art: PixelArt) -> None:
-        """Make one traced graphic available in the GUI designer."""
+    def _publish_gui_pixel_asset(self, asset: GraphicsAsset, art: PixelArt) -> str:
+        """Make one traced graphic available and return its stable key."""
         source_path = asset.document.path.resolve()
+        key = f"{source_path}::{asset.record.qualified_name}"
         self.screen_designer.upsert_pixel_asset(
             GuiPixelAsset(
-                f"{source_path}::{asset.record.qualified_name}",
+                key,
                 asset.record.name,
                 str(source_path),
                 asset.record.name,
                 art.copy(),
             )
         )
+        return key
 
 
 def color_button_style(color: int) -> str:
