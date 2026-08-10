@@ -7,9 +7,9 @@ import unittest
 from pathlib import Path
 
 
-TOOLS_PATH = Path(__file__).resolve().parents[2] / "tools"
-if str(TOOLS_PATH) not in sys.path:
-    sys.path.insert(0, str(TOOLS_PATH))
+REPOSITORY_PATH = Path(__file__).resolve().parents[2]
+if str(REPOSITORY_PATH) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_PATH))
 
 from pico_graphics_editor.model import PixelArt, rgb565_to_rgb, rgb_to_rgb565
 

@@ -7,19 +7,19 @@ Pico Graphics Editor is a standalone Qt6 pixel-art editor for graphics embedded 
 Install the desktop dependency:
 
 ```bash
-python3 -m pip install -r tools/pico_graphics_editor/requirements.txt
+python3 -m pip install -r pico_graphics_editor/requirements.txt
 ```
 
 Open the editor:
 
 ```bash
-python3 tools/pico-graphics-editor.py
+./pico-graphics-editor.sh
 ```
 
 Open a renderer or project immediately:
 
 ```bash
-python3 tools/pico-graphics-editor.py builds/MicroPython/apps_unfrozen/games/pico_bomber/render.py
+./pico-graphics-editor.sh builds/MicroPython/apps_unfrozen/games/pico_bomber/render.py
 ```
 
 ## Workflow

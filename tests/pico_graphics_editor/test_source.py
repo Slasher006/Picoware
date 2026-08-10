@@ -9,10 +9,9 @@ import unittest
 from pathlib import Path
 
 
-TOOLS_PATH = Path(__file__).resolve().parents[2] / "tools"
 REPOSITORY_PATH = Path(__file__).resolve().parents[2]
-if str(TOOLS_PATH) not in sys.path:
-    sys.path.insert(0, str(TOOLS_PATH))
+if str(REPOSITORY_PATH) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_PATH))
 
 from pico_graphics_editor.source import SourceExporter, SourceScanner, TraceInterpreter
 

@@ -9,9 +9,9 @@ from pathlib import Path
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-TOOLS_PATH = Path(__file__).resolve().parents[2] / "tools"
-if str(TOOLS_PATH) not in sys.path:
-    sys.path.insert(0, str(TOOLS_PATH))
+REPOSITORY_PATH = Path(__file__).resolve().parents[2]
+if str(REPOSITORY_PATH) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_PATH))
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
