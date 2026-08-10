@@ -13,9 +13,13 @@ REPOSITORY_PATH = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_PATH) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_PATH))
 
+from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt
+from PySide6.QtGui import QDropEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from pico_graphics_editor.designer import (
+    ELEMENT_MIME_TYPE,
     DesignerSession,
     ScreenDesignerWidget,
     ScreenFlowWidget,
@@ -50,6 +54,28 @@ class DesignerUiTests(unittest.TestCase):
         self.assertTrue(session.dirty)
         widget.close()
 
+    def test_palette_element_drops_at_canvas_position(self) -> None:
+        """Create and select an element from a palette drop."""
+        session = DesignerSession()
+        widget = ScreenDesignerWidget(session)
+        widget.canvas.set_zoom(100)
+        mime = QMimeData()
+        mime.setData(ELEMENT_MIME_TYPE, b"button")
+        event = QDropEvent(
+            QPointF(180, 140),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        widget.canvas.dropEvent(event)
+        element = session.current_screen().elements[0]
+        self.assertEqual(element.kind, "button")
+        self.assertEqual((element.x, element.y), (120, 122))
+        self.assertEqual(widget.selected_element_id, element.id)
+        self.assertTrue(event.isAccepted())
+        widget.close()
+
     def test_custom_profile_changes_all_screen_sizes(self) -> None:
         """Apply custom dimensions across a designer project."""
         session = DesignerSession()
@@ -80,6 +106,66 @@ class DesignerUiTests(unittest.TestCase):
         widget._send_simulator_event()
         self.assertEqual(len(project.connections), 1)
         self.assertEqual(widget.simulated_screen_id, target.id)
+        widget.close()
+
+    def test_node_ports_create_relation_with_mouse(self) -> None:
+        """Drag between graph ports to create a navigation relation."""
+        project = GuiProject.create("Mouse Flow")
+        target = ScreenDesign.create("Game", 320, 320, 1)
+        project.screens.append(target)
+        session = DesignerSession()
+        session.set_project(project)
+        widget = ScreenFlowWidget(session)
+        widget.trigger_edit.setText("open")
+        widget.show()
+        self.application.processEvents()
+        source = project.screens[0]
+        source_port = QPoint(source.node_x + 160, source.node_y + 35)
+        target_port = QPoint(target.node_x, target.node_y + 35)
+        QTest.mousePress(
+            widget.graph,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            source_port,
+        )
+        QTest.mouseMove(widget.graph, target_port)
+        QTest.mouseRelease(
+            widget.graph,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            target_port,
+        )
+        self.assertEqual(len(project.connections), 1)
+        connection = project.connections[0]
+        self.assertEqual(connection.source_id, source.id)
+        self.assertEqual(connection.target_id, target.id)
+        self.assertEqual(connection.trigger, "open")
+        widget.close()
+
+    def test_node_body_remains_mouse_draggable(self) -> None:
+        """Move a node by its body without starting a connection."""
+        session = DesignerSession()
+        widget = ScreenFlowWidget(session)
+        widget.show()
+        self.application.processEvents()
+        screen = session.current_screen()
+        start = QPoint(screen.node_x + 80, screen.node_y + 35)
+        destination = start + QPoint(40, 30)
+        QTest.mousePress(
+            widget.graph,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            start,
+        )
+        QTest.mouseMove(widget.graph, destination)
+        QTest.mouseRelease(
+            widget.graph,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            destination,
+        )
+        self.assertEqual((screen.node_x, screen.node_y), (110, 100))
+        self.assertEqual(session.project.connections, [])
         widget.close()
 
     def test_locked_imported_element_is_read_only(self) -> None:

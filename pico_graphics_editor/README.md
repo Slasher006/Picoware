@@ -77,7 +77,7 @@ Screens support these visual elements:
 - Lists
 - Progress indicators
 
-Elements can be selected, dragged, resized, renamed, hidden, recolored, and positioned numerically. Each screen has its own background color and can use a temporary full-screen reference image. Screens can be added, duplicated, deleted, and opened directly from the flow graph.
+Drag buttons, labels, panels, rectangles, icons, lists, and progress indicators from the element palette directly onto the canvas. Palette buttons can still be clicked for quick insertion. Elements can then be selected, dragged, resized, renamed, hidden, recolored, and positioned numerically. Each screen has its own background color and can use a temporary full-screen reference image. Screens can be added, duplicated, deleted, and opened directly from the flow graph.
 
 Use **GUI Project** in the menu bar to create, open, save, or export a project. Python export generates one marked renderer class containing screen draw methods and navigation handling. Re-export replaces only that marked block.
 
@@ -102,6 +102,8 @@ Every application screen is represented as a draggable node. Directed relations 
 - `replace`, `push`, `modal`, or `back` transition behavior
 
 One screen is marked as the start screen. Double-click a graph node to open it in the GUI designer. The navigation simulator accepts event names, follows matching relations, reports conditions and actions, and renders the resulting screen without running Pico hardware code.
+
+Each graph node has a green input port and blue output port. Drag from the blue port of one node to the green port or body of another node to create a relation with the values currently shown in the relation form. Nodes remain independently draggable, and mouse-wheel graph zoom continues to work.
 
 ## Supported source patterns
 

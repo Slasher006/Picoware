@@ -5,17 +5,32 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QObject, Signal
+from PySide6.QtCore import (
+    QMimeData,
+    QPoint,
+    QPointF,
+    QRectF,
+    QSize,
+    Qt,
+    QObject,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
+    QDrag,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
     QImage,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPen,
     QPolygonF,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -50,6 +65,9 @@ from .designer_model import (
 )
 from .model import rgb_to_rgb565
 from .reference import prepare_reference_image, read_image_frames
+
+
+ELEMENT_MIME_TYPE = "application/x-pico-gui-element"
 
 
 class DesignerSession(QObject):
@@ -203,12 +221,48 @@ def draw_element(
         )
 
 
+class ElementPaletteButton(QPushButton):
+    """Provide click and drag creation for one GUI element kind."""
+
+    def __init__(self, kind: str, parent: QWidget | None = None):
+        """Initialize a draggable palette button for the given kind."""
+        super().__init__(kind.title(), parent)
+        self.kind = kind
+        self._drag_start = QPoint()
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setToolTip(f"Drag a {kind} onto the canvas, or click to add it.")
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """Remember where a possible palette drag started."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        """Start a copy drag after the platform movement threshold."""
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            super().mouseMoveEvent(event)
+            return
+        distance = (event.position().toPoint() - self._drag_start).manhattanLength()
+        if distance < QApplication.startDragDistance():
+            super().mouseMoveEvent(event)
+            return
+        mime = QMimeData()
+        mime.setData(ELEMENT_MIME_TYPE, self.kind.encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(self.grab())
+        drag.setHotSpot(event.position().toPoint())
+        drag.exec(Qt.DropAction.CopyAction)
+
+
 class DesignCanvas(QWidget):
     """Provide direct selection, dragging, and resizing of GUI elements."""
 
     element_selected = Signal(str)
     geometry_changed = Signal()
     zoom_changed = Signal(int)
+    element_dropped = Signal(str, int, int)
 
     def __init__(self, session: DesignerSession, parent: QWidget | None = None):
         """Initialize the screen design canvas."""
@@ -220,6 +274,9 @@ class DesignCanvas(QWidget):
         self.reference_opacity = 45
         self._drag_mode = ""
         self._drag_offset = QPointF()
+        self._drop_kind = ""
+        self._drop_point = QPointF()
+        self.setAcceptDrops(True)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._update_size()
@@ -267,7 +324,53 @@ class DesignCanvas(QWidget):
             self.reference,
             self.reference_opacity / 100,
         )
+        if self._drop_kind:
+            factor = self.zoom_percent / 100
+            point = QPointF(
+                self._drop_point.x() * factor, self._drop_point.y() * factor
+            )
+            guide = QRectF(point.x() - 46, point.y() - 16, 92, 32)
+            painter.setBrush(QColor(0, 170, 255, 45))
+            painter.setPen(QPen(QColor("#00aaff"), 2, Qt.PenStyle.DashLine))
+            painter.drawRoundedRect(guide, 5, 5)
+            painter.drawText(
+                guide, Qt.AlignmentFlag.AlignCenter, self._drop_kind.title()
+            )
         painter.end()
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        """Accept supported GUI element palette drags."""
+        if self._drag_kind(event.mimeData()) is not None:
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        """Preview a supported element at its prospective drop point."""
+        kind = self._drag_kind(event.mimeData())
+        if kind is None:
+            event.ignore()
+            return
+        self._drop_kind = kind
+        self._drop_point = self._design_point(event.position())
+        self.update()
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event) -> None:
+        """Clear the palette drop preview when the drag leaves."""
+        self._clear_drop_preview()
+        event.accept()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        """Create a palette element at the dropped canvas position."""
+        kind = self._drag_kind(event.mimeData())
+        if kind is None:
+            event.ignore()
+            return
+        point = self._design_point(event.position())
+        self._clear_drop_preview()
+        self.element_dropped.emit(kind, round(point.x()), round(point.y()))
+        event.acceptProposedAction()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Select an element and begin moving or resizing it."""
@@ -375,6 +478,19 @@ class DesignCanvas(QWidget):
             None,
         )
 
+    def _drag_kind(self, mime: QMimeData) -> str | None:
+        """Return a valid GUI element kind from drag data."""
+        if not mime.hasFormat(ELEMENT_MIME_TYPE):
+            return None
+        kind = bytes(mime.data(ELEMENT_MIME_TYPE)).decode("utf-8", "ignore")
+        return kind if kind in ELEMENT_KINDS else None
+
+    def _clear_drop_preview(self) -> None:
+        """Clear the active palette drop guide."""
+        self._drop_kind = ""
+        self._drop_point = QPointF()
+        self.update()
+
     def _update_size(self) -> None:
         """Update the scrollable canvas size."""
         self.setFixedSize(self.sizeHint())
@@ -455,10 +571,10 @@ class ScreenDesignerWidget(QWidget):
         center = QWidget()
         center_layout = QVBoxLayout(center)
         tools = QHBoxLayout()
-        tools.addWidget(QLabel("Add element"))
-        self.element_buttons: dict[str, QPushButton] = {}
+        tools.addWidget(QLabel("Drag onto canvas"))
+        self.element_buttons: dict[str, ElementPaletteButton] = {}
         for kind in ELEMENT_KINDS:
-            button = QPushButton(kind.title())
+            button = ElementPaletteButton(kind)
             self.element_buttons[kind] = button
             tools.addWidget(button)
         tools.addStretch(1)
@@ -533,6 +649,7 @@ class ScreenDesignerWidget(QWidget):
         self.canvas.element_selected.connect(self._canvas_element_selected)
         self.canvas.geometry_changed.connect(self._canvas_geometry_changed)
         self.canvas.zoom_changed.connect(self.zoom_spin.setValue)
+        self.canvas.element_dropped.connect(self._drop_element)
         self.zoom_spin.valueChanged.connect(self.canvas.set_zoom)
         self.add_screen_button.clicked.connect(self._add_screen)
         self.duplicate_screen_button.clicked.connect(self._duplicate_screen)
@@ -706,6 +823,16 @@ class ScreenDesignerWidget(QWidget):
         """Add one element to the active screen."""
         screen = self.session.current_screen()
         element = GuiElement.create(kind, len(screen.elements) + 1)
+        screen.elements.append(element)
+        self.selected_element_id = element.id
+        self.session.mark_changed()
+
+    def _drop_element(self, kind: str, x: int, y: int) -> None:
+        """Add one palette element centered at a canvas drop point."""
+        screen = self.session.current_screen()
+        element = GuiElement.create(kind, len(screen.elements) + 1)
+        element.x = max(0, min(screen.width - element.width, x - element.width // 2))
+        element.y = max(0, min(screen.height - element.height, y - element.height // 2))
         screen.elements.append(element)
         self.selected_element_id = element.id
         self.session.mark_changed()
@@ -1005,6 +1132,11 @@ class FlowCanvas(QWidget):
 
     screen_selected = Signal(str)
     screen_activated = Signal(str)
+    connection_requested = Signal(str, str)
+
+    NODE_WIDTH = 160
+    NODE_HEIGHT = 70
+    PORT_RADIUS = 7
 
     def __init__(self, session: DesignerSession, parent: QWidget | None = None):
         """Initialize the draggable screen graph."""
@@ -1013,6 +1145,11 @@ class FlowCanvas(QWidget):
         self.selected_screen_id: str | None = None
         self.zoom = 1.0
         self._drag_offset = QPointF()
+        self._node_dragging = False
+        self._connection_source_id: str | None = None
+        self._connection_point = QPointF()
+        self._connection_target_id: str | None = None
+        self.setMouseTracking(True)
         self.setMinimumSize(1400, 900)
 
     def paintEvent(self, event) -> None:
@@ -1027,23 +1164,37 @@ class FlowCanvas(QWidget):
             target = project.screen(connection.target_id)
             if source is not None and target is not None:
                 self._draw_connection(painter, source, target, connection)
+        source = project.screen(self._connection_source_id or "")
+        if source is not None:
+            self._draw_connection_preview(painter, source)
         for screen in project.screens:
             self._draw_node(painter, screen)
         painter.end()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        """Select a screen node and begin dragging it."""
+        """Begin a node move or connection drag."""
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        point = QPointF(
-            event.position().x() / self.zoom, event.position().y() / self.zoom
-        )
+        point = self._graph_point(event.position())
+        output_screen = self._output_screen_at(point)
+        if output_screen is not None:
+            self.selected_screen_id = output_screen.id
+            self._connection_source_id = output_screen.id
+            self._connection_point = point
+            self._connection_target_id = None
+            self._node_dragging = False
+            self.screen_selected.emit(output_screen.id)
+            self.update()
+            event.accept()
+            return
         screen = self._screen_at(point)
         if screen is None:
             self.selected_screen_id = None
+            self._node_dragging = False
             self.update()
             return
         self.selected_screen_id = screen.id
+        self._node_dragging = True
         self._drag_offset = QPointF(
             point.x() - screen.node_x, point.y() - screen.node_y
         )
@@ -1051,25 +1202,46 @@ class FlowCanvas(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        """Move the selected screen node."""
+        """Move a node or preview a dragged connection."""
         if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        point = self._graph_point(event.position())
+        if self._connection_source_id is not None:
+            target = self._connection_target_at(point)
+            self._connection_target_id = target.id if target is not None else None
+            self._connection_point = (
+                self._input_port(target) if target is not None else point
+            )
+            self.update()
+            return
+        if not self._node_dragging:
             return
         screen = self.session.project.screen(self.selected_screen_id or "")
         if screen is None:
             return
-        point = QPointF(
-            event.position().x() / self.zoom, event.position().y() / self.zoom
-        )
         screen.node_x = max(10, round(point.x() - self._drag_offset.x()))
         screen.node_y = max(10, round(point.y() - self._drag_offset.y()))
         self.session.mark_changed(False)
         self.update()
 
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        """Finish a node move or create the dragged connection."""
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        source_id = self._connection_source_id
+        target_id = self._connection_target_id
+        self._connection_source_id = None
+        self._connection_target_id = None
+        self._connection_point = QPointF()
+        self._node_dragging = False
+        self.update()
+        if source_id and target_id:
+            self.connection_requested.emit(source_id, target_id)
+        event.accept()
+
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         """Open a double-clicked screen in the GUI designer."""
-        point = QPointF(
-            event.position().x() / self.zoom, event.position().y() / self.zoom
-        )
+        point = self._graph_point(event.position())
         screen = self._screen_at(point)
         if screen is not None:
             self.screen_activated.emit(screen.id)
@@ -1086,7 +1258,9 @@ class FlowCanvas(QWidget):
 
     def _draw_node(self, painter: QPainter, screen: ScreenDesign) -> None:
         """Draw one screen node."""
-        rectangle = QRectF(screen.node_x, screen.node_y, 160, 70)
+        rectangle = QRectF(
+            screen.node_x, screen.node_y, self.NODE_WIDTH, self.NODE_HEIGHT
+        )
         selected = screen.id == self.selected_screen_id
         start = screen.id == self.session.project.start_screen_id
         color = QColor("#43a047") if start else QColor("#4c566a")
@@ -1106,6 +1280,20 @@ class FlowCanvas(QWidget):
             painter.drawText(QPointF(screen.node_x + 6, screen.node_y + 62), "SOURCE")
         if start:
             painter.drawText(QPointF(screen.node_x + 6, screen.node_y + 14), "START")
+        input_color = (
+            QColor("#ebcb8b")
+            if screen.id == self._connection_target_id
+            else QColor("#a3be8c")
+        )
+        painter.setPen(QPen(QColor("#20242a"), 1))
+        painter.setBrush(input_color)
+        painter.drawEllipse(
+            self._input_port(screen), self.PORT_RADIUS, self.PORT_RADIUS
+        )
+        painter.setBrush(QColor("#5e81ac"))
+        painter.drawEllipse(
+            self._output_port(screen), self.PORT_RADIUS, self.PORT_RADIUS
+        )
 
     def _draw_connection(
         self,
@@ -1115,12 +1303,14 @@ class FlowCanvas(QWidget):
         connection: FlowConnection,
     ) -> None:
         """Draw one labeled directional graph edge."""
-        start = QPointF(source.node_x + 160, source.node_y + 35)
-        end = QPointF(target.node_x, target.node_y + 35)
+        start = self._output_port(source)
+        end = self._input_port(target)
+        path, approach = self._connection_path(start, end)
         edge_color = QColor("#ff9800") if connection.locked else QColor("#88c0d0")
         painter.setPen(QPen(edge_color, 2))
-        painter.drawLine(start, end)
-        direction = end - start
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+        direction = end - approach
         length = max(1.0, (direction.x() ** 2 + direction.y() ** 2) ** 0.5)
         unit = QPointF(direction.x() / length, direction.y() / length)
         normal = QPointF(-unit.y(), unit.x())
@@ -1133,16 +1323,80 @@ class FlowCanvas(QWidget):
         )
         painter.setBrush(edge_color)
         painter.drawPolygon(arrow)
-        midpoint = (start + end) / 2
+        midpoint = path.pointAtPercent(0.5)
         painter.setPen(QColor("#eceff4"))
         painter.drawText(midpoint + QPointF(4, -5), connection.trigger)
+
+    def _draw_connection_preview(self, painter: QPainter, source: ScreenDesign) -> None:
+        """Draw the temporary edge while the mouse chooses a target."""
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor("#00bfff"), 2, Qt.PenStyle.DashLine))
+        painter.drawLine(self._output_port(source), self._connection_point)
+
+    def _connection_path(
+        self, start: QPointF, end: QPointF
+    ) -> tuple[QPainterPath, QPointF]:
+        """Return a readable curved edge and its final approach point."""
+        gap = end.x() - start.x()
+        handle = max(30.0, min(120.0, abs(gap) * 0.5))
+        if gap < 0:
+            vertical_offset = 90.0
+            first = QPointF(start.x() + 80, start.y() + vertical_offset)
+            second = QPointF(end.x() - 80, end.y() + vertical_offset)
+        else:
+            vertical_offset = -70.0 if gap > self.NODE_WIDTH else 0.0
+            first = QPointF(start.x() + handle, start.y() + vertical_offset)
+            second = QPointF(end.x() - handle, end.y() + vertical_offset)
+        path = QPainterPath(start)
+        path.cubicTo(first, second, end)
+        return path, second
 
     def _screen_at(self, point: QPointF) -> ScreenDesign | None:
         """Return the topmost graph node at one point."""
         for screen in reversed(self.session.project.screens):
-            if QRectF(screen.node_x, screen.node_y, 160, 70).contains(point):
+            if QRectF(
+                screen.node_x,
+                screen.node_y,
+                self.NODE_WIDTH,
+                self.NODE_HEIGHT,
+            ).contains(point):
                 return screen
         return None
+
+    def _output_screen_at(self, point: QPointF) -> ScreenDesign | None:
+        """Return the screen whose output port contains the point."""
+        for screen in reversed(self.session.project.screens):
+            port = self._output_port(screen)
+            if (point.x() - port.x()) ** 2 + (point.y() - port.y()) ** 2 <= (
+                self.PORT_RADIUS + 5
+            ) ** 2:
+                return screen
+        return None
+
+    def _connection_target_at(self, point: QPointF) -> ScreenDesign | None:
+        """Return a connection target below an input port or node body."""
+        for screen in reversed(self.session.project.screens):
+            port = self._input_port(screen)
+            if (point.x() - port.x()) ** 2 + (point.y() - port.y()) ** 2 <= (
+                self.PORT_RADIUS + 7
+            ) ** 2:
+                return screen
+        return self._screen_at(point)
+
+    def _input_port(self, screen: ScreenDesign) -> QPointF:
+        """Return the center of a screen node input port."""
+        return QPointF(screen.node_x, screen.node_y + self.NODE_HEIGHT / 2)
+
+    def _output_port(self, screen: ScreenDesign) -> QPointF:
+        """Return the center of a screen node output port."""
+        return QPointF(
+            screen.node_x + self.NODE_WIDTH,
+            screen.node_y + self.NODE_HEIGHT / 2,
+        )
+
+    def _graph_point(self, point: QPointF) -> QPointF:
+        """Convert widget coordinates into zoomed graph coordinates."""
+        return QPointF(point.x() / self.zoom, point.y() / self.zoom)
 
 
 class ScreenFlowWidget(QWidget):
@@ -1167,6 +1421,11 @@ class ScreenFlowWidget(QWidget):
         controls_layout = QVBoxLayout(controls)
         relation_group = QGroupBox("Screen relation")
         relation_form = QFormLayout(relation_group)
+        connection_hint = QLabel(
+            "Drag from a node's blue right port to another node's green left port."
+        )
+        connection_hint.setWordWrap(True)
+        relation_form.addRow(connection_hint)
         self.source_combo = QComboBox()
         self.target_combo = QComboBox()
         self.trigger_edit = QLineEdit("select")
@@ -1234,6 +1493,7 @@ class ScreenFlowWidget(QWidget):
         self.session.project_changed.connect(self.refresh)
         self.graph.screen_selected.connect(self._graph_screen_selected)
         self.graph.screen_activated.connect(self._open_screen)
+        self.graph.connection_requested.connect(self._graph_connection_requested)
         self.add_relation_button.clicked.connect(self._add_relation)
         self.update_relation_button.clicked.connect(self._update_relation)
         self.delete_relation_button.clicked.connect(self._delete_relation)
@@ -1296,12 +1556,46 @@ class ScreenFlowWidget(QWidget):
                 self, "Incomplete relation", "Choose screens and enter a trigger."
             )
             return
+        self._create_relation(source_id, target_id, trigger)
+
+    def _create_relation(self, source_id: str, target_id: str, trigger: str) -> None:
+        """Create one design relation from form or mouse-selected nodes."""
+        duplicate = next(
+            (
+                connection
+                for connection in self.session.project.connections
+                if connection.source_id == source_id
+                and connection.target_id == target_id
+                and connection.trigger == trigger
+            ),
+            None,
+        )
+        if duplicate is not None:
+            self._select_connection_id(duplicate.id)
+            return
         connection = FlowConnection.create(source_id, target_id, trigger)
         connection.condition = self.condition_edit.text().strip()
         connection.action = self.action_edit.text().strip()
         connection.transition = self.transition_combo.currentText()
         self.session.project.connections.append(connection)
         self.session.mark_changed()
+        self._select_connection_id(connection.id)
+
+    def _graph_connection_requested(self, source_id: str, target_id: str) -> None:
+        """Create a relation from a mouse-drawn graph connection."""
+        self._restore_combo(self.source_combo, source_id)
+        self._restore_combo(self.target_combo, target_id)
+        trigger = self.trigger_edit.text().strip() or "select"
+        self.trigger_edit.setText(trigger)
+        self._create_relation(source_id, target_id, trigger)
+
+    def _select_connection_id(self, connection_id: str) -> None:
+        """Select a relation list item by project identifier."""
+        for row in range(self.connection_list.count()):
+            item = self.connection_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == connection_id:
+                self.connection_list.setCurrentRow(row)
+                return
 
     def _update_relation(self) -> None:
         """Update the selected relationship."""
