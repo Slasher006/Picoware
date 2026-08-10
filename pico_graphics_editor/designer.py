@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -59,7 +59,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .canvas import qcolor_from_rgb565
+from .canvas import pixel_art_image, qcolor_from_rgb565
 from .designer_model import (
     DEVICE_PROFILES,
     ELEMENT_KINDS,
@@ -76,11 +76,12 @@ from .live_simulator import (
     LiveSimulatorController,
     LiveSimulatorView,
 )
-from .model import rgb_to_rgb565
+from .model import PixelArt, rgb_to_rgb565
 from .reference import prepare_reference_image, read_image_frames
 
 
 ELEMENT_MIME_TYPE = "application/x-pico-gui-element"
+PIXEL_ASSET_MIME_TYPE = "application/x-pico-gui-pixel-asset"
 FLOW_ELEMENT_SEPARATOR = "::element::"
 FOCUS_STYLES = (
     ("Outline", "outline"),
@@ -88,6 +89,17 @@ FOCUS_STYLES = (
     ("Underline", "underline"),
     ("Hidden", "none"),
 )
+
+
+@dataclass
+class GuiPixelAsset:
+    """Describe one source graphic offered to the GUI designer."""
+
+    key: str
+    name: str
+    source_path: str
+    function_name: str
+    art: PixelArt
 
 
 def flow_endpoint_key(screen_id: str, element_id: str = "") -> str:
@@ -382,6 +394,10 @@ def draw_element(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             element.text,
         )
+    elif element.kind == "icon" and (
+        element.asset_runs or (element.asset_width > 0 and element.asset_height > 0)
+    ):
+        draw_embedded_asset(painter, element)
     elif element.kind == "rectangle":
         painter.fillRect(rectangle, fill)
     else:
@@ -432,6 +448,31 @@ def draw_element(
         )
     if focused:
         draw_focus_indicator(painter, element)
+
+
+def draw_embedded_asset(painter: QPainter, element: GuiElement) -> None:
+    """Draw one embedded pixel asset scaled to its element bounds."""
+    source_width = max(1, element.asset_width or element.width)
+    source_height = max(1, element.asset_height or element.height)
+    for run in element.asset_runs:
+        if len(run) != 4:
+            continue
+        run_x, run_y, run_width, color = (int(value) for value in run)
+        if run_width < 1:
+            continue
+        left = round(run_x * element.width / source_width)
+        right = round((run_x + run_width) * element.width / source_width)
+        top = round(run_y * element.height / source_height)
+        bottom = round((run_y + 1) * element.height / source_height)
+        painter.fillRect(
+            QRectF(
+                element.x + left,
+                element.y + top,
+                max(1, right - left),
+                max(1, bottom - top),
+            ),
+            qcolor_from_rgb565(color & 0xFFFF),
+        )
 
 
 def draw_focus_indicator(painter: QPainter, element: GuiElement) -> None:
@@ -513,6 +554,25 @@ class ElementPaletteButton(QPushButton):
         drag.exec(Qt.DropAction.CopyAction)
 
 
+class PixelAssetList(QListWidget):
+    """Provide draggable source pixel assets for GUI screens."""
+
+    def startDrag(self, supported_actions) -> None:
+        """Start a copy drag for the selected pixel asset."""
+        item = self.currentItem()
+        if item is None:
+            return
+        key = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if not key:
+            return
+        mime = QMimeData()
+        mime.setData(PIXEL_ASSET_MIME_TYPE, key.encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(item.icon().pixmap(self.iconSize()))
+        drag.exec(Qt.DropAction.CopyAction)
+
+
 class DesignCanvas(QWidget):
     """Provide direct selection, dragging, and resizing of GUI elements."""
 
@@ -521,6 +581,7 @@ class DesignCanvas(QWidget):
     geometry_changed = Signal()
     zoom_changed = Signal(int)
     element_dropped = Signal(str, int, int)
+    asset_dropped = Signal(str, int, int)
     delete_requested = Signal()
     duplicate_requested = Signal()
 
@@ -692,7 +753,10 @@ class DesignCanvas(QWidget):
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         """Accept supported GUI element palette drags."""
-        if self._drag_kind(event.mimeData()) is not None:
+        if (
+            self._drag_kind(event.mimeData()) is not None
+            or self._drag_asset_key(event.mimeData()) is not None
+        ):
             event.acceptProposedAction()
             return
         event.ignore()
@@ -700,10 +764,11 @@ class DesignCanvas(QWidget):
     def dragMoveEvent(self, event: QDragMoveEvent) -> None:
         """Preview a supported element at its prospective drop point."""
         kind = self._drag_kind(event.mimeData())
-        if kind is None:
+        asset_key = self._drag_asset_key(event.mimeData())
+        if kind is None and asset_key is None:
             event.ignore()
             return
-        self._drop_kind = kind
+        self._drop_kind = kind or "icon"
         self._drop_point = self._design_point(event.position())
         self.update()
         event.acceptProposedAction()
@@ -716,12 +781,22 @@ class DesignCanvas(QWidget):
     def dropEvent(self, event: QDropEvent) -> None:
         """Create a palette element at the dropped canvas position."""
         kind = self._drag_kind(event.mimeData())
-        if kind is None:
+        asset_key = self._drag_asset_key(event.mimeData())
+        if kind is None and asset_key is None:
             event.ignore()
             return
         point = self._design_point(event.position())
         self._clear_drop_preview()
-        self.element_dropped.emit(kind, round(point.x()), round(point.y()))
+        if asset_key is not None:
+            self.asset_dropped.emit(
+                asset_key,
+                round(point.x()),
+                round(point.y()),
+            )
+        else:
+            self.element_dropped.emit(
+                kind or "icon", round(point.x()), round(point.y())
+            )
         event.acceptProposedAction()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -961,6 +1036,13 @@ class DesignCanvas(QWidget):
         kind = bytes(mime.data(ELEMENT_MIME_TYPE)).decode("utf-8", "ignore")
         return kind if kind in ELEMENT_KINDS else None
 
+    def _drag_asset_key(self, mime: QMimeData) -> str | None:
+        """Return a source pixel asset key from drag data."""
+        if not mime.hasFormat(PIXEL_ASSET_MIME_TYPE):
+            return None
+        key = bytes(mime.data(PIXEL_ASSET_MIME_TYPE)).decode("utf-8", "ignore")
+        return key or None
+
     def _clear_drop_preview(self) -> None:
         """Clear the active palette drop guide."""
         self._drop_kind = ""
@@ -981,6 +1063,7 @@ class ScreenDesignerWidget(QWidget):
         self.session = session
         self.selected_element_id: str | None = None
         self.selected_element_ids: set[str] = set()
+        self.pixel_assets: dict[str, GuiPixelAsset] = {}
         self._updating = False
         self._build_interface()
         self._connect_signals()
@@ -1036,6 +1119,21 @@ class ScreenDesignerWidget(QWidget):
         screen_buttons.addWidget(self.duplicate_screen_button, 0, 1)
         screen_buttons.addWidget(self.delete_screen_button, 1, 0, 1, 2)
         left_layout.addLayout(screen_buttons)
+        asset_group = QGroupBox("Pixel assets")
+        asset_layout = QVBoxLayout(asset_group)
+        self.pixel_asset_list = PixelAssetList()
+        self.pixel_asset_list.setIconSize(QSize(44, 44))
+        self.pixel_asset_list.setSortingEnabled(True)
+        self.pixel_asset_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.pixel_asset_list.setMaximumHeight(190)
+        self.pixel_asset_list.setToolTip(
+            "Drag a pixel asset onto the screen, or double-click to add it."
+        )
+        self.add_pixel_asset_button = QPushButton("Add selected asset")
+        self.add_pixel_asset_button.setEnabled(False)
+        asset_layout.addWidget(self.pixel_asset_list)
+        asset_layout.addWidget(self.add_pixel_asset_button)
+        left_layout.addWidget(asset_group)
         reference_group = QGroupBox("Screen reference")
         reference_layout = QVBoxLayout(reference_group)
         self.open_reference_button = QPushButton("Open image...")
@@ -1217,6 +1315,12 @@ class ScreenDesignerWidget(QWidget):
         self.canvas.geometry_changed.connect(self._canvas_geometry_changed)
         self.canvas.zoom_changed.connect(self.zoom_spin.setValue)
         self.canvas.element_dropped.connect(self._drop_element)
+        self.canvas.asset_dropped.connect(self._drop_pixel_asset)
+        self.pixel_asset_list.itemSelectionChanged.connect(
+            self._pixel_asset_selection_changed
+        )
+        self.pixel_asset_list.itemDoubleClicked.connect(self._pixel_asset_activated)
+        self.add_pixel_asset_button.clicked.connect(self._add_selected_pixel_asset)
         self.zoom_spin.valueChanged.connect(self.canvas.set_zoom)
         self.grid_visible_check.toggled.connect(self.canvas.set_grid_visible)
         self.snap_check.toggled.connect(self.canvas.set_snap_enabled)
@@ -1462,6 +1566,129 @@ class ScreenDesignerWidget(QWidget):
         """Add one element to the active screen."""
         screen = self.session.current_screen()
         element = GuiElement.create(kind, len(screen.elements) + 1)
+        screen.elements.append(element)
+        self.selected_element_id = element.id
+        self.selected_element_ids = {element.id}
+        self.session.mark_changed()
+
+    def set_pixel_assets(self, assets: list[GuiPixelAsset]) -> None:
+        """Replace the source pixel assets offered by the designer."""
+        selected = self._selected_pixel_asset_key()
+        self.pixel_assets = {asset.key: asset for asset in assets}
+        self.pixel_asset_list.clear()
+        for asset in assets:
+            self.pixel_asset_list.addItem(self._pixel_asset_item(asset))
+        restored = self._pixel_asset_item_for_key(selected)
+        if restored is not None:
+            self.pixel_asset_list.setCurrentItem(restored)
+        elif self.pixel_asset_list.count():
+            self.pixel_asset_list.setCurrentRow(0)
+        self._pixel_asset_selection_changed()
+
+    def upsert_pixel_asset(self, asset: GuiPixelAsset) -> None:
+        """Add or refresh one source pixel asset in the designer."""
+        self.pixel_assets[asset.key] = asset
+        existing = self._pixel_asset_item_for_key(asset.key)
+        replacement = self._pixel_asset_item(asset)
+        if existing is None:
+            self.pixel_asset_list.addItem(replacement)
+            if self.pixel_asset_list.currentItem() is None:
+                self.pixel_asset_list.setCurrentItem(replacement)
+        else:
+            existing.setText(replacement.text())
+            existing.setIcon(replacement.icon())
+            existing.setToolTip(replacement.toolTip())
+        self._pixel_asset_selection_changed()
+
+    def _pixel_asset_item(self, asset: GuiPixelAsset) -> QListWidgetItem:
+        """Build one source pixel asset catalogue item."""
+        image = pixel_art_image(asset.art, checker=True)
+        pixmap = QPixmap.fromImage(image).scaled(
+            self.pixel_asset_list.iconSize(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        item = QListWidgetItem(QIcon(pixmap), asset.name)
+        item.setData(Qt.ItemDataRole.UserRole, asset.key)
+        item.setToolTip(
+            f"{asset.function_name}\n{asset.source_path}\n"
+            "Drag onto the screen or double-click to add."
+        )
+        return item
+
+    def _pixel_asset_item_for_key(self, key: str) -> QListWidgetItem | None:
+        """Return the catalogue item matching one pixel asset key."""
+        if not key:
+            return None
+        for row in range(self.pixel_asset_list.count()):
+            item = self.pixel_asset_list.item(row)
+            if str(item.data(Qt.ItemDataRole.UserRole) or "") == key:
+                return item
+        return None
+
+    def _selected_pixel_asset_key(self) -> str:
+        """Return the selected source pixel asset key."""
+        item = self.pixel_asset_list.currentItem()
+        if item is None:
+            return ""
+        return str(item.data(Qt.ItemDataRole.UserRole) or "")
+
+    def _pixel_asset_selection_changed(self) -> None:
+        """Enable pixel asset insertion for a valid selection."""
+        key = self._selected_pixel_asset_key()
+        self.add_pixel_asset_button.setEnabled(key in self.pixel_assets)
+
+    def _pixel_asset_activated(self, item: QListWidgetItem) -> None:
+        """Insert a double-clicked pixel asset into the active screen."""
+        self.pixel_asset_list.setCurrentItem(item)
+        self._add_selected_pixel_asset()
+
+    def _add_selected_pixel_asset(self) -> None:
+        """Insert the selected pixel asset at the screen center."""
+        asset = self.pixel_assets.get(self._selected_pixel_asset_key())
+        if asset is None:
+            return
+        screen = self.session.current_screen()
+        self._insert_pixel_asset(asset, screen.width // 2, screen.height // 2)
+
+    def _drop_pixel_asset(self, key: str, x: int, y: int) -> None:
+        """Insert a source pixel asset at its canvas drop point."""
+        asset = self.pixel_assets.get(key)
+        if asset is not None:
+            self._insert_pixel_asset(asset, x, y)
+
+    def _insert_pixel_asset(self, asset: GuiPixelAsset, x: int, y: int) -> None:
+        """Create one portable icon element from a source pixel asset."""
+        screen = self.session.current_screen()
+        element = GuiElement.create("icon", len(screen.elements) + 1)
+        element.name = f"{asset.name}_{len(screen.elements) + 1}"
+        element.text = ""
+        element.asset_call = asset.function_name
+        element.asset_width = asset.art.width
+        element.asset_height = asset.art.height
+        blank = PixelArt(
+            asset.art.width,
+            asset.art.height,
+            asset.art.origin_x,
+            asset.art.origin_y,
+        )
+        element.asset_runs = [list(run) for run in asset.art.horizontal_runs(blank)]
+        element.width = min(screen.width, asset.art.width)
+        element.height = min(screen.height, asset.art.height)
+        element.x = max(
+            0,
+            min(
+                screen.width - element.width,
+                self.canvas.snap_value(x - element.width // 2),
+            ),
+        )
+        element.y = max(
+            0,
+            min(
+                screen.height - element.height,
+                self.canvas.snap_value(y - element.height // 2),
+            ),
+        )
         screen.elements.append(element)
         self.selected_element_id = element.id
         self.selected_element_ids = {element.id}

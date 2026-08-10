@@ -57,7 +57,7 @@ The **Reference image** panel supports PNG, JPEG, WebP, BMP, and GIF files. A re
 
 No AI conversion is used.
 
-**Create new Python graphic** creates a new module-level drawing function from the positioned reference or imported animation frames. After the reviewed RGB565 runs are written, the exact generated function is automatically loaded into the pixel editor. Further mouse edits enable **Apply to Python** and write back to the same destination.
+**Create new Python graphic** creates a new module-level drawing function from the positioned reference or imported animation frames. After the reviewed RGB565 runs are written, the exact generated function is automatically loaded into the pixel editor and appears immediately in the App GUI pixel-asset catalogue. Further mouse edits enable **Apply to Python** and write back to the same destination.
 
 ## Animation frames
 
@@ -79,7 +79,7 @@ Screens support these visual elements:
 - Lists
 - Progress indicators
 
-Drag buttons, labels, panels, rectangles, icons, lists, and progress indicators from the element palette directly onto the canvas. Palette buttons can still be clicked for quick insertion. Elements can then be selected, dragged, resized, renamed, hidden, recolored, and positioned numerically. Mouse-wheel zoom, an optional grid, configurable snapping, alignment, and even-spacing controls make precise layouts faster.
+Drag buttons, labels, panels, rectangles, icons, lists, and progress indicators from the element palette directly onto the canvas. The **Pixel assets** catalogue also shows graphics discovered in the currently opened Python file or folder; drag one onto the screen, double-click it, or use **Add selected asset**. Its RGB565 pixels are embedded in the GUI project so designer previews, saved projects, Python exports, and the live simulator keep the same appearance without importing the original drawing function. Palette buttons can still be clicked for quick insertion. Elements can then be selected, dragged, resized, renamed, hidden, recolored, and positioned numerically. Mouse-wheel zoom, an optional grid, configurable snapping, alignment, and even-spacing controls make precise layouts faster.
 
 Shift-click or drag a selection rectangle to edit several elements together. Arrow keys move the selection by one pixel, Shift+Arrow moves it by ten, Ctrl+D duplicates it, and Delete removes design-only elements. The hierarchy acts as a layers panel: drag rows to reorder drawing depth, or use the lock and visibility controls. Screen rows include live thumbnails of their actual contents and can also be reordered by dragging.
 

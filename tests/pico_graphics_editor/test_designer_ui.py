@@ -20,7 +20,9 @@ from PySide6.QtWidgets import QApplication
 
 from pico_graphics_editor.designer import (
     ELEMENT_MIME_TYPE,
+    PIXEL_ASSET_MIME_TYPE,
     DesignerSession,
+    GuiPixelAsset,
     ScreenDesignerWidget,
     ScreenFlowWidget,
 )
@@ -30,6 +32,7 @@ from pico_graphics_editor.designer_model import (
     GuiProject,
     ScreenDesign,
 )
+from pico_graphics_editor.model import PixelArt
 
 
 class DesignerUiTests(unittest.TestCase):
@@ -72,6 +75,49 @@ class DesignerUiTests(unittest.TestCase):
         element = session.current_screen().elements[0]
         self.assertEqual(element.kind, "button")
         self.assertEqual((element.x, element.y), (120, 122))
+        self.assertEqual(widget.selected_element_id, element.id)
+        self.assertTrue(event.isAccepted())
+        widget.close()
+
+    def test_pixel_asset_is_available_and_drops_as_embedded_icon(self) -> None:
+        """Offer a traced asset and embed its pixels on canvas drop."""
+        session = DesignerSession()
+        widget = ScreenDesignerWidget(session)
+        widget.canvas.set_zoom(100)
+        art = PixelArt(4, 3)
+        art.set_pixel(0, 0, 0xF800)
+        art.set_pixel(1, 0, 0xF800)
+        art.set_pixel(3, 2, 0x07E0)
+        asset = GuiPixelAsset(
+            "fixture::draw_badge",
+            "draw_badge",
+            "/tmp/fixture.py",
+            "draw_badge",
+            art,
+        )
+        widget.set_pixel_assets([asset])
+        self.assertEqual(widget.pixel_asset_list.count(), 1)
+        self.assertEqual(widget.pixel_asset_list.item(0).text(), "draw_badge")
+        mime = QMimeData()
+        mime.setData(PIXEL_ASSET_MIME_TYPE, asset.key.encode("utf-8"))
+        event = QDropEvent(
+            QPointF(180, 140),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        widget.canvas.dropEvent(event)
+        element = session.current_screen().elements[0]
+        self.assertEqual(element.kind, "icon")
+        self.assertEqual(element.asset_call, "draw_badge")
+        self.assertEqual((element.asset_width, element.asset_height), (4, 3))
+        self.assertEqual(
+            element.asset_runs,
+            [[0, 0, 2, 0xF800], [3, 2, 1, 0x07E0]],
+        )
+        self.assertEqual((element.width, element.height), (4, 3))
+        self.assertEqual((element.x, element.y), (178, 139))
         self.assertEqual(widget.selected_element_id, element.id)
         self.assertTrue(event.isAccepted())
         widget.close()

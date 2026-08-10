@@ -15,6 +15,7 @@ REPOSITORY_PATH = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_PATH) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_PATH))
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from pico_graphics_editor.model import PixelArt
@@ -123,6 +124,11 @@ class WindowTests(unittest.TestCase):
         self.assertIsNotNone(self.window.current_asset)
         self.assertEqual(self.window.current_asset.record.name, "draw_badge")
         self.assertEqual(self.window._scan_path, target.resolve())
+        self.assertEqual(self.window.screen_designer.pixel_asset_list.count(), 1)
+        pixel_item = self.window.screen_designer.pixel_asset_list.item(0)
+        self.assertEqual(pixel_item.text(), "draw_badge")
+        pixel_key = str(pixel_item.data(Qt.ItemDataRole.UserRole))
+        self.assertIn(pixel_key, self.window.screen_designer.pixel_assets)
         self.window.canvas.art().set_pixel(0, 0, 0x07E0)
         self.window._canvas_changed()
         self.assertTrue(self.window.apply_button.isEnabled())
@@ -138,6 +144,9 @@ class WindowTests(unittest.TestCase):
         updated = target.read_text(encoding="utf-8")
         self.assertIn("0x07E0", updated)
         self.assertFalse(self.window._dirty)
+        self.assertEqual(self.window.screen_designer.pixel_asset_list.count(), 1)
+        refreshed_asset = next(iter(self.window.screen_designer.pixel_assets.values()))
+        self.assertEqual(refreshed_asset.art.pixel(0, 0), 0x07E0)
 
     def test_animation_frames_can_be_duplicated_and_reordered(self) -> None:
         """Duplicate a source frame and change playback order."""

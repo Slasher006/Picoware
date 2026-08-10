@@ -47,7 +47,12 @@ from .app_importer import (
     build_imported_app_patches,
     refresh_import_metadata,
 )
-from .designer import DesignerSession, ScreenDesignerWidget, ScreenFlowWidget
+from .designer import (
+    DesignerSession,
+    GuiPixelAsset,
+    ScreenDesignerWidget,
+    ScreenFlowWidget,
+)
 from .designer_model import GuiProject, backup_project, build_designer_patch
 from .model import PixelArt, rgb_to_rgb565
 from .reference import (
@@ -1505,6 +1510,7 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         self.assets = assets
+        self.screen_designer.set_pixel_assets([])
         self._thumbnail_generation += 1
         generation = self._thumbnail_generation
         self._thumbnail_queue = list(range(len(assets)))
@@ -1559,6 +1565,7 @@ class MainWindow(QMainWindow):
                     Qt.TransformationMode.FastTransformation,
                 )
                 item.setIcon(QIcon(pixmap))
+                self._publish_gui_pixel_asset(asset, trace.current_art)
             except Exception:
                 pass
         if self._thumbnail_queue:
@@ -1909,6 +1916,7 @@ class MainWindow(QMainWindow):
             return
         self.current_trace = trace
         displayed_art = self._animation_art(trace)
+        self._publish_gui_pixel_asset(self.current_asset, displayed_art)
         self._suppress_changes = True
         self.canvas.set_art(displayed_art)
         self._suppress_changes = False
@@ -2219,6 +2227,19 @@ class MainWindow(QMainWindow):
         if asset is None:
             return None
         return asset.document.path, asset.record.qualified_name
+
+    def _publish_gui_pixel_asset(self, asset: GraphicsAsset, art: PixelArt) -> None:
+        """Make one traced graphic available in the GUI designer."""
+        source_path = asset.document.path.resolve()
+        self.screen_designer.upsert_pixel_asset(
+            GuiPixelAsset(
+                f"{source_path}::{asset.record.qualified_name}",
+                asset.record.name,
+                str(source_path),
+                asset.record.name,
+                art.copy(),
+            )
+        )
 
 
 def color_button_style(color: int) -> str:

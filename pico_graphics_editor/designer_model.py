@@ -76,6 +76,9 @@ class GuiElement:
     focus_color: int = 0xFFE0
     focus_thickness: int = 2
     focus_padding: int = 2
+    asset_width: int = 0
+    asset_height: int = 0
+    asset_runs: list[list[int]] = field(default_factory=list)
 
     @classmethod
     def create(cls, kind: str, index: int) -> GuiElement:
@@ -210,7 +213,7 @@ class GuiProject:
     screens: list[ScreenDesign]
     connections: list[FlowConnection] = field(default_factory=list)
     start_screen_id: str = ""
-    format_version: int = 4
+    format_version: int = 5
     import_root: str = ""
     imported_sources: dict[str, str] = field(default_factory=dict)
 
@@ -238,7 +241,7 @@ class GuiProject:
             screens,
             connections,
             str(values.get("start_screen_id", "")),
-            max(4, int(values.get("format_version", 1))),
+            max(5, int(values.get("format_version", 1))),
             str(values.get("import_root", "")),
             {
                 str(path): str(digest)
@@ -585,6 +588,10 @@ def _element_python(element: GuiElement) -> list[str]:
         f"{prefix}self.draw._rectangle({element.x}, {element.y}, "
         f"{element.width}, {element.height}, {border})\n"
     )
+    if element.kind == "icon" and (
+        element.asset_runs or (element.asset_width > 0 and element.asset_height > 0)
+    ):
+        return _embedded_asset_python(element, prefix)
     if element.kind == "label":
         return [
             f"{prefix}self.draw._text({element.x}, {element.y}, {element.text!r}, {text})\n"
@@ -610,6 +617,27 @@ def _element_python(element: GuiElement) -> list[str]:
             f"{prefix}self.draw._fill_rectangle({element.x}, {element.y}, {progress_width}, {element.height}, {border})\n"
         )
     return lines
+
+
+def _embedded_asset_python(element: GuiElement, prefix: str) -> list[str]:
+    """Generate scaled drawing runs for one embedded pixel asset."""
+    source_width = max(1, element.asset_width or element.width)
+    source_height = max(1, element.asset_height or element.height)
+    lines: list[str] = []
+    for run in element.asset_runs:
+        if len(run) != 4:
+            continue
+        run_x, run_y, run_width, color = (int(value) for value in run)
+        left = round(run_x * element.width / source_width)
+        right = round((run_x + run_width) * element.width / source_width)
+        top = round(run_y * element.height / source_height)
+        bottom = round((run_y + 1) * element.height / source_height)
+        lines.append(
+            f"{prefix}self.draw._fill_rectangle("
+            f"{element.x + left}, {element.y + top}, "
+            f"{max(1, right - left)}, {max(1, bottom - top)}, 0x{color & 0xFFFF:04X})\n"
+        )
+    return lines or [f"{prefix}pass\n"]
 
 
 def _focus_indicator_python(element: GuiElement, prefix: str) -> list[str]:

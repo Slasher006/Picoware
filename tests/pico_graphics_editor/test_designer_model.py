@@ -42,6 +42,10 @@ class DesignerModelTests(unittest.TestCase):
         project.screens[0].elements.append(element)
         second = ScreenDesign.create("Game", 320, 320, 1)
         target_element = GuiElement.create("icon", 1)
+        target_element.asset_call = "draw_badge"
+        target_element.asset_width = 2
+        target_element.asset_height = 2
+        target_element.asset_runs = [[0, 0, 1, 0xF800], [1, 1, 1, 0x07E0]]
         second.elements.append(target_element)
         project.screens.append(second)
         project.connections.append(
@@ -77,7 +81,16 @@ class DesignerModelTests(unittest.TestCase):
             loaded.connections[0].target_element_id,
             target_element.id,
         )
-        self.assertEqual(loaded.format_version, 4)
+        loaded_target = loaded.screens[1].elements[0]
+        self.assertEqual(loaded_target.asset_call, "draw_badge")
+        self.assertEqual(
+            (loaded_target.asset_width, loaded_target.asset_height), (2, 2)
+        )
+        self.assertEqual(
+            loaded_target.asset_runs,
+            [[0, 0, 1, 0xF800], [1, 1, 1, 0x07E0]],
+        )
+        self.assertEqual(loaded.format_version, 5)
 
     def test_generated_python_is_parseable(self) -> None:
         """Generate valid screen drawing and flow methods."""
@@ -93,6 +106,31 @@ class DesignerModelTests(unittest.TestCase):
         self.assertIn("_fill_rectangle", source)
         self.assertIn("def move_focus", source)
         self.assertIn("('open_settings',)", source)
+
+    def test_generated_python_embeds_pixel_asset_runs(self) -> None:
+        """Generate portable drawing calls for a placed pixel asset."""
+        project = GuiProject.create("Pixel Assets")
+        icon = GuiElement.create("icon", 1)
+        icon.x = 10
+        icon.y = 20
+        icon.width = 4
+        icon.height = 4
+        icon.asset_call = "draw_badge"
+        icon.asset_width = 2
+        icon.asset_height = 2
+        icon.asset_runs = [[0, 0, 1, 0xF800], [1, 1, 1, 0x07E0]]
+        project.screens[0].elements.append(icon)
+        source = generate_live_app_python(project, project.start_screen_id)
+        ast.parse(source)
+        self.assertIn(
+            "self.draw._fill_rectangle(10, 20, 2, 2, 0xF800)",
+            source,
+        )
+        self.assertIn(
+            "self.draw._fill_rectangle(12, 22, 2, 2, 0x07E0)",
+            source,
+        )
+        self.assertNotIn("self.draw_badge(", source)
 
     def test_live_app_starts_on_active_unsaved_screen(self) -> None:
         """Generate a temporary app with the active screen as its initial state."""
