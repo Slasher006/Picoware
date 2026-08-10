@@ -115,7 +115,7 @@ Each graph node has a green input port and blue output port. Drag from the blue 
 
 ### Live simulator preview
 
-The Screen Flow preview supports **Designer**, **Live simulator**, and **Compare** views. Live mode launches Picoware's real MicroPython simulator as an isolated child process and embeds its RGB565 framebuffer directly in the Qt workspace; it does not open the separate SDL viewer window.
+The Screen Flow preview supports **Designer**, **Live simulator**, and **Compare** views. Live mode launches Picoware's real MicroPython simulator as an isolated child process and embeds its RGB565 framebuffer directly in the Qt workspace; it does not open the separate SDL viewer window. **Current design** is the default launch mode: starting or restarting live view builds a temporary app from the in-memory project and opens the currently active screen, including unsaved designer edits, without changing application source.
 
 For imported applications, the editor infers an Application or Game route from the imported path. The launch type, target name, and board remain editable, so external or unusual projects can be configured manually. Start, stop, or restart the child process from the preview toolbar. When **Reload on source changes** is enabled, saved Python changes restart the simulator automatically.
 

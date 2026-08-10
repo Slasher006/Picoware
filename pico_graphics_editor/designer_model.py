@@ -398,6 +398,82 @@ def generate_python(project: GuiProject) -> str:
     return "".join(lines)
 
 
+def generate_live_app_python(project: GuiProject, active_screen_id: str) -> str:
+    """Generate a temporary Picoware app starting on the active design screen."""
+    preview = GuiProject.from_dict(project.to_dict())
+    active = preview.screen(active_screen_id)
+    if active is None:
+        active = preview.screen(preview.start_screen_id) or preview.screens[0]
+    preview.start_screen_id = active.id
+    for screen in preview.screens:
+        for element in screen.elements:
+            if element.kind == "icon" and element.asset_call:
+                element.asset_call = ""
+    class_name = _python_name(preview.name, "GeneratedGui")
+    lines = [
+        "from picoware.system.buttons import (\n",
+        "    BUTTON_BACK,\n",
+        "    BUTTON_CENTER,\n",
+        "    BUTTON_DOWN,\n",
+        "    BUTTON_LEFT,\n",
+        "    BUTTON_RIGHT,\n",
+        "    BUTTON_UP,\n",
+        ")\n",
+        "\n",
+        generate_python(preview),
+        "\n",
+        "_live_gui = None\n",
+        "\n",
+        "\n",
+        "def _redraw(view_manager):\n",
+        '    """Render the current live design screen."""\n',
+        "    draw = view_manager.draw\n",
+        "    draw.clear()\n",
+        "    _live_gui.render()\n",
+        "    draw.swap()\n",
+        "\n",
+        "\n",
+        "def start(view_manager):\n",
+        '    """Start the temporary GUI designer preview."""\n',
+        "    global _live_gui\n",
+        f"    _live_gui = {class_name}(view_manager.draw)\n",
+        "    _redraw(view_manager)\n",
+        "    view_manager.input_manager.reset()\n",
+        "    return True\n",
+        "\n",
+        "\n",
+        "def run(view_manager):\n",
+        '    """Handle navigation inside the live design preview."""\n',
+        "    if _live_gui is None:\n",
+        "        return\n",
+        "    input_manager = view_manager.input_manager\n",
+        "    button = input_manager.button\n",
+        "    if button == -1:\n",
+        "        return\n",
+        "    if button == BUTTON_BACK:\n",
+        "        input_manager.reset()\n",
+        "        view_manager.back()\n",
+        "        return\n",
+        "    if button in (BUTTON_RIGHT, BUTTON_DOWN):\n",
+        "        _live_gui.move_focus(1)\n",
+        "    elif button in (BUTTON_LEFT, BUTTON_UP):\n",
+        "        _live_gui.move_focus(-1)\n",
+        "    elif button == BUTTON_CENTER:\n",
+        "        _live_gui.activate_focused()\n",
+        "    input_manager.reset()\n",
+        "    _redraw(view_manager)\n",
+        "\n",
+        "\n",
+        "def stop(view_manager):\n",
+        '    """Release the temporary GUI designer preview."""\n',
+        "    global _live_gui\n",
+        "    _live_gui = None\n",
+    ]
+    source = "".join(lines)
+    ast.parse(source, filename="GuiDesignerLive.py")
+    return source
+
+
 def _screen_python(screen: ScreenDesign) -> list[str]:
     """Generate one screen drawing method."""
     lines = [

@@ -19,6 +19,7 @@ from pico_graphics_editor.designer_model import (
     GuiProject,
     ScreenDesign,
     build_designer_patch,
+    generate_live_app_python,
     generate_python,
 )
 
@@ -63,6 +64,19 @@ class DesignerModelTests(unittest.TestCase):
         self.assertIn("_fill_rectangle", source)
         self.assertIn("def move_focus", source)
         self.assertIn("('open_settings',)", source)
+
+    def test_live_app_starts_on_active_unsaved_screen(self) -> None:
+        """Generate a temporary app with the active screen as its initial state."""
+        project = GuiProject.create("Live Demo")
+        second = ScreenDesign.create("Details", 320, 320, 1)
+        second.background_color = 0xF800
+        project.screens.append(second)
+        source = generate_live_app_python(project, second.id)
+        ast.parse(source)
+        self.assertIn("self.screen = 'Details'", source)
+        self.assertIn("def start(view_manager):", source)
+        self.assertIn("def run(view_manager):", source)
+        self.assertEqual(project.start_screen_id, project.screens[0].id)
 
     def test_patch_replaces_managed_block(self) -> None:
         """Update one designer block without duplicating it."""

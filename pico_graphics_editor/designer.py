@@ -67,6 +67,7 @@ from .designer_model import (
     GuiElement,
     GuiProject,
     ScreenDesign,
+    generate_live_app_python,
     new_identifier,
 )
 from .live_simulator import (
@@ -2468,7 +2469,7 @@ class ScreenFlowWidget(QWidget):
         self.preview_mode_combo.addItem("Compare", "compare")
         self.live_target_kind_combo = QComboBox()
         self.live_target_kind_combo.addItems(
-            ("Desktop", "Application", "Game", "Library")
+            ("Current design", "Desktop", "Application", "Game", "Library")
         )
         self.live_target_edit = QLineEdit()
         self.live_target_edit.setPlaceholderText("Application or Library name")
@@ -2549,7 +2550,7 @@ class ScreenFlowWidget(QWidget):
             self._live_target_kind_changed
         )
         self.start_live_button.clicked.connect(self._start_live_simulator)
-        self.restart_live_button.clicked.connect(self.live_controller.restart)
+        self.restart_live_button.clicked.connect(self._start_live_simulator)
         self.stop_live_button.clicked.connect(self.live_controller.stop)
         self.capture_live_button.clicked.connect(self._capture_live_frame)
         self.clear_live_capture_button.clicked.connect(self._clear_live_capture)
@@ -2851,8 +2852,8 @@ class ScreenFlowWidget(QWidget):
             )
 
     def _live_target_kind_changed(self, kind: str) -> None:
-        """Enable a launch target only for non-desktop simulator routes."""
-        self.live_target_edit.setEnabled(kind != "Desktop")
+        """Enable naming only for simulator routes that require a target."""
+        self.live_target_edit.setEnabled(kind not in {"Current design", "Desktop"})
 
     def _update_live_target_defaults(self) -> None:
         """Infer a simulator route when a new imported application is loaded."""
@@ -2861,7 +2862,9 @@ class ScreenFlowWidget(QWidget):
             return
         self._live_import_root = import_root
         kind, name = self._infer_live_target(import_root)
-        self.live_target_kind_combo.setCurrentText(kind)
+        self.live_target_kind_combo.setCurrentText("Current design")
+        placeholder = f"Suggested {kind}: {name}" if name else "Application name"
+        self.live_target_edit.setPlaceholderText(placeholder)
         self.live_target_edit.setText(name)
 
     def _infer_live_target(self, import_root: str) -> tuple[str, str]:
@@ -2927,13 +2930,23 @@ class ScreenFlowWidget(QWidget):
         """Start an isolated simulator for the selected route and board."""
         kind = self.live_target_kind_combo.currentText()
         target = self.live_target_edit.text().strip()
-        if kind != "Desktop" and not target:
+        if kind not in {"Current design", "Desktop"} and not target:
             QMessageBox.information(
                 self,
                 "Simulator target required",
                 "Enter the application, game, or Library route name.",
             )
             return
+        design_source = ""
+        if kind == "Current design":
+            try:
+                design_source = generate_live_app_python(
+                    self.session.project,
+                    self.session.active_screen_id,
+                )
+            except (SyntaxError, ValueError) as error:
+                QMessageBox.information(self, "Cannot preview design", str(error))
+                return
         config = LiveSimulatorConfig(
             target_kind=kind,
             target_name=target,
@@ -2941,6 +2954,7 @@ class ScreenFlowWidget(QWidget):
             apps_source=self._live_apps_source(),
             watch_path=self.session.project.import_root,
             auto_reload=self.live_auto_reload_check.isChecked(),
+            design_source=design_source,
         )
         self.live_controller.start(config)
         if self.preview_mode_combo.currentData() == "designer":

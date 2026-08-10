@@ -44,12 +44,13 @@ SIMULATOR_BOARDS = (
 class LiveSimulatorConfig:
     """Describe one isolated Picoware simulator launch."""
 
-    target_kind: str = "Desktop"
+    target_kind: str = "Current design"
     target_name: str = ""
     board: str = "picocalc-pico2w"
     apps_source: str = ""
     watch_path: str = ""
     auto_reload: bool = True
+    design_source: str = ""
 
 
 def rgb565_frame_image(data: bytes, width: int, height: int) -> QImage:
@@ -134,15 +135,23 @@ class LiveSimulatorController(QObject):
             "real",
         ]
         apps_source = config.apps_source.strip()
+        target_kind = config.target_kind
+        target_name = config.target_name.strip()
+        if config.design_source:
+            apps_source = self._write_design_app(config.design_source)
+            if not apps_source:
+                return
+            target_kind = "Application"
+            target_name = "GuiDesignerLive"
         if apps_source:
             arguments.extend(("--apps-source", apps_source))
         target_option = {
             "Application": "--app",
             "Game": "--game",
             "Library": "--open",
-        }.get(config.target_kind)
-        if target_option and config.target_name.strip():
-            arguments.extend((target_option, config.target_name.strip()))
+        }.get(target_kind)
+        if target_option and target_name:
+            arguments.extend((target_option, target_name))
         self._process.setWorkingDirectory(str(self._repository))
         self._process.setProgram(executable)
         self._process.setArguments(arguments)
@@ -372,6 +381,18 @@ class LiveSimulatorController(QObject):
                 handle.write(text)
         except OSError as error:
             self.error_changed.emit(f"Simulator bridge write failed: {error}")
+
+    def _write_design_app(self, source: str) -> str:
+        """Write the in-memory GUI design as an isolated temporary app."""
+        apps_path = Path(self._temporary.path()) / "design_apps"
+        target = apps_path / "GuiDesignerLive.py"
+        try:
+            apps_path.mkdir(parents=True, exist_ok=True)
+            target.write_text(source, encoding="utf-8")
+        except OSError as error:
+            self.error_changed.emit(f"Could not prepare the live GUI design: {error}")
+            return ""
+        return str(apps_path)
 
 
 class LiveSimulatorView(QWidget):

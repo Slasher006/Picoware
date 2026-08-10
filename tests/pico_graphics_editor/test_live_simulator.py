@@ -30,6 +30,11 @@ from pico_graphics_editor.live_simulator import (
     LiveSimulatorView,
     rgb565_frame_image,
 )
+from pico_graphics_editor.designer_model import (
+    GuiProject,
+    ScreenDesign,
+    generate_live_app_python,
+)
 
 
 class LiveSimulatorTests(unittest.TestCase):
@@ -74,7 +79,7 @@ class LiveSimulatorTests(unittest.TestCase):
         view.close()
 
     def test_imported_game_infers_live_launch_target(self) -> None:
-        """Infer a Game route from an imported launcher under games."""
+        """Keep current design default while suggesting an imported Game route."""
         with tempfile.TemporaryDirectory() as folder:
             games = Path(folder) / "games"
             games.mkdir()
@@ -83,8 +88,12 @@ class LiveSimulatorTests(unittest.TestCase):
             session = DesignerSession()
             session.project.import_root = str(launcher)
             widget = ScreenFlowWidget(session)
-            self.assertEqual(widget.live_target_kind_combo.currentText(), "Game")
+            self.assertEqual(
+                widget.live_target_kind_combo.currentText(),
+                "Current design",
+            )
             self.assertEqual(widget.live_target_edit.text(), "Pico Bomber")
+            self.assertIn("Suggested Game", widget.live_target_edit.placeholderText())
             widget.shutdown_live_simulator()
             widget.close()
 
@@ -109,6 +118,24 @@ class LiveSimulatorTests(unittest.TestCase):
         self.assertEqual(session.live_screen_images, {})
         widget.close()
 
+    def test_live_start_uses_current_active_design(self) -> None:
+        """Build live source from the selected screen and unsaved project state."""
+        session = DesignerSession()
+        active = ScreenDesign.create("Selected", 320, 320, 1)
+        active.background_color = 0x07E0
+        session.project.screens.append(active)
+        session.set_active_screen(active.id)
+        widget = ScreenFlowWidget(session)
+        configs: list[LiveSimulatorConfig] = []
+        widget.live_controller.start = configs.append
+        widget._start_live_simulator()
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0].target_kind, "Current design")
+        self.assertIn("self.screen = 'Selected'", configs[0].design_source)
+        self.assertIn("0x07E0", configs[0].design_source)
+        widget.shutdown_live_simulator()
+        widget.close()
+
     def test_controller_launches_headless_bridge(self) -> None:
         """Launch the real simulator and receive its first live framebuffer."""
         controller = LiveSimulatorController()
@@ -128,6 +155,39 @@ class LiveSimulatorTests(unittest.TestCase):
             commands = controller.keys_path.read_text(encoding="utf-8")
             self.assertIn("down 181 0", commands)
             self.assertIn("up 181 0", commands)
+        finally:
+            controller.shutdown()
+
+    def test_controller_launches_active_gui_design(self) -> None:
+        """Render the selected in-memory GUI screen through the real simulator."""
+        project = GuiProject.create("Live Test")
+        active = ScreenDesign.create("Active", 320, 320, 1)
+        active.background_color = 0xF800
+        project.screens.append(active)
+        source = generate_live_app_python(project, active.id)
+        controller = LiveSimulatorController()
+        statuses: list[str] = []
+        controller.status_changed.connect(statuses.append)
+        try:
+            controller.start(
+                LiveSimulatorConfig(
+                    auto_reload=False,
+                    design_source=source,
+                )
+            )
+            for unused in range(160):
+                if any("app_GuiDesignerLive" in status for status in statuses):
+                    break
+                QTest.qWait(50)
+            self.assertTrue(
+                any("app_GuiDesignerLive" in status for status in statuses),
+                statuses[-3:],
+            )
+            QTest.qWait(150)
+            image = controller.current_frame()
+            self.assertFalse(image.isNull())
+            self.assertGreater(image.pixelColor(160, 160).red(), 240)
+            self.assertLess(image.pixelColor(160, 160).green(), 20)
         finally:
             controller.shutdown()
 
