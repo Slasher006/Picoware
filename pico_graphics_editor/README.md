@@ -33,6 +33,13 @@ Open a renderer or project immediately:
 7. Inspect the exact source diff before applying it.
 
 The eraser paints with its configured RGB565 background color. Right-click the canvas to pick an existing color.
+Use the mouse wheel over the canvas to zoom in or out. The toolbar zoom value follows the wheel automatically.
+
+## Animation frames
+
+Functions with inferred `frame`, `phase`, or `animation_time` variants get a dedicated **Animation frames** panel. Use **Previous** and **Next** or the frame selector to edit each state, **Play** to preview the sequence, and **Show previous frame** for an onion-skin drawing guide.
+
+Apply an edited frame to Python before selecting another frame. The generated overlay is limited to the selected frame and the exact source diff is still shown before writing.
 
 ## Supported source patterns
 

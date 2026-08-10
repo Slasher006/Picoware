@@ -15,6 +15,7 @@ class PixelCanvas(QWidget):
     color_picked = Signal(int)
     document_changed = Signal()
     cursor_changed = Signal(int, int, object)
+    zoom_changed = Signal(int)
 
     def __init__(self, parent: QWidget | None = None):
         """Initialize the editable canvas."""
@@ -32,6 +33,8 @@ class PixelCanvas(QWidget):
         self._last: tuple[int, int] | None = None
         self._gesture_base: PixelArt | None = None
         self._display_cache: QImage | None = None
+        self._onion_art: PixelArt | None = None
+        self._onion_cache: QImage | None = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._update_size()
@@ -47,6 +50,8 @@ class PixelCanvas(QWidget):
         self._redo.clear()
         self._gesture_base = None
         self._display_cache = None
+        self._onion_art = None
+        self._onion_cache = None
         self._update_size()
         self.update()
         self.document_changed.emit()
@@ -65,9 +70,13 @@ class PixelCanvas(QWidget):
 
     def set_zoom(self, zoom: int) -> None:
         """Set the integer display zoom."""
-        self._zoom = max(1, min(40, zoom))
+        new_zoom = max(1, min(40, zoom))
+        if new_zoom == self._zoom:
+            return
+        self._zoom = new_zoom
         self._update_size()
         self.update()
+        self.zoom_changed.emit(self._zoom)
 
     def zoom(self) -> int:
         """Return the integer display zoom."""
@@ -76,6 +85,30 @@ class PixelCanvas(QWidget):
     def set_grid_visible(self, visible: bool) -> None:
         """Show or hide pixel grid lines."""
         self._show_grid = visible
+        self.update()
+
+    def set_onion_art(self, art: PixelArt | None) -> None:
+        """Set an optional animation frame overlay."""
+        if art is None:
+            self._onion_art = None
+            self._onion_cache = None
+        else:
+            aligned = PixelArt(
+                self._art.width,
+                self._art.height,
+                self._art.origin_x,
+                self._art.origin_y,
+            )
+            for y in range(art.height):
+                for x in range(art.width):
+                    color = art.pixel(x, y)
+                    if color is None:
+                        continue
+                    target_x = art.origin_x + x - self._art.origin_x
+                    target_y = art.origin_y + y - self._art.origin_y
+                    aligned.set_pixel(target_x, target_y, color)
+            self._onion_art = aligned
+            self._onion_cache = pixel_art_image(self._onion_art)
         self.update()
 
     def can_undo(self) -> bool:
@@ -125,6 +158,13 @@ class PixelCanvas(QWidget):
             QRect(0, 0, self._art.width * cell, self._art.height * cell),
             self._display_cache,
         )
+        if self._onion_cache is not None:
+            painter.setOpacity(0.28)
+            painter.drawImage(
+                QRect(0, 0, self._art.width * cell, self._art.height * cell),
+                self._onion_cache,
+            )
+            painter.setOpacity(1.0)
         if self._show_grid and cell >= 6:
             painter.setPen(QPen(QColor(0, 0, 0, 55), 1))
             for x in range(self._art.width + 1):
@@ -199,13 +239,14 @@ class PixelCanvas(QWidget):
             self._finish_gesture()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        """Adjust zoom while Control is held."""
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            direction = 1 if event.angleDelta().y() > 0 else -1
-            self.set_zoom(self._zoom + direction)
-            event.accept()
+        """Adjust zoom directly with the mouse wheel."""
+        delta = event.angleDelta().y()
+        if delta == 0:
+            super().wheelEvent(event)
             return
-        super().wheelEvent(event)
+        direction = 1 if delta > 0 else -1
+        self.set_zoom(self._zoom + direction)
+        event.accept()
 
     def _paint_color(self) -> int:
         """Return the active tool's paint color."""

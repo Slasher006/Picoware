@@ -134,8 +134,13 @@ class SourceTests(unittest.TestCase):
         names = {asset.record.name for asset in assets}
         self.assertIn("_draw_solid", names)
         self.assertIn("_draw_player", names)
+        self.assertIn("_draw_slime_enemy", names)
         solid = next(asset for asset in assets if asset.record.name == "_draw_solid")
+        slime = next(
+            asset for asset in assets if asset.record.name == "_draw_slime_enemy"
+        )
         self.assertEqual(solid.variants["theme"], list(range(8)))
+        self.assertEqual(slime.variants["frame"], list(range(8)))
         trace = self.tracer.render(solid, {"theme": 0})
         self.assertGreaterEqual(len(trace.primitives), 4)
 

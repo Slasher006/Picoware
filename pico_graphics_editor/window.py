@@ -93,6 +93,9 @@ class MainWindow(QMainWindow):
         self.current_trace: TraceResult | None = None
         self.variant_values: dict[str, Any] = {}
         self.variant_controls: dict[str, QComboBox] = {}
+        self.animation_parameter: str | None = None
+        self.animation_timer = QTimer(self)
+        self.animation_timer.setInterval(250)
         self._scan_path: Path | None = None
         self._scan_folder = False
         self._dirty = False
@@ -273,6 +276,29 @@ class MainWindow(QMainWindow):
         self.variant_form = QFormLayout(self.variant_group)
         layout.addWidget(self.variant_group)
 
+        self.animation_group = QGroupBox("Animation frames")
+        animation_layout = QVBoxLayout(self.animation_group)
+        frame_layout = QGridLayout()
+        self.previous_frame_button = QPushButton("Previous")
+        self.frame_combo = QComboBox()
+        self.next_frame_button = QPushButton("Next")
+        frame_layout.addWidget(self.previous_frame_button, 0, 0)
+        frame_layout.addWidget(self.frame_combo, 0, 1)
+        frame_layout.addWidget(self.next_frame_button, 0, 2)
+        animation_layout.addLayout(frame_layout)
+        playback_layout = QGridLayout()
+        self.play_button = QPushButton("Play")
+        self.play_button.setCheckable(True)
+        self.onion_skin_check = QCheckBox("Show previous frame")
+        self.onion_skin_check.setToolTip(
+            "Overlay the previous frame while drawing the current frame."
+        )
+        playback_layout.addWidget(self.play_button, 0, 0)
+        playback_layout.addWidget(self.onion_skin_check, 0, 1)
+        animation_layout.addLayout(playback_layout)
+        self.animation_group.setVisible(False)
+        layout.addWidget(self.animation_group)
+
         palette_group = QGroupBox("RGB565 palette")
         palette_layout = QVBoxLayout(palette_group)
         self.color_label = QLabel("Paint 0xFFFF   Erase 0x0000")
@@ -327,6 +353,7 @@ class MainWindow(QMainWindow):
         self.primary_button.clicked.connect(self._choose_primary_color)
         self.background_button.clicked.connect(self._choose_background_color)
         self.zoom_spin.valueChanged.connect(self.canvas.set_zoom)
+        self.canvas.zoom_changed.connect(self.zoom_spin.setValue)
         self.grid_check.toggled.connect(self.canvas.set_grid_visible)
         self.search_edit.textChanged.connect(self._filter_assets)
         self.asset_list.currentRowChanged.connect(self._select_asset)
@@ -335,6 +362,12 @@ class MainWindow(QMainWindow):
         self.canvas.cursor_changed.connect(self._cursor_changed)
         self.apply_button.clicked.connect(self._apply_to_source)
         self.export_button.clicked.connect(self._export_png)
+        self.previous_frame_button.clicked.connect(self._previous_animation_frame)
+        self.next_frame_button.clicked.connect(self._next_animation_frame)
+        self.frame_combo.currentIndexChanged.connect(self._animation_frame_changed)
+        self.play_button.toggled.connect(self._toggle_animation)
+        self.onion_skin_check.toggled.connect(self._update_onion_skin)
+        self.animation_timer.timeout.connect(self._advance_animation)
 
     def _open_file(self) -> None:
         """Prompt for one Python source file."""
@@ -487,6 +520,7 @@ class MainWindow(QMainWindow):
 
     def _load_asset(self, asset: GraphicsAsset) -> None:
         """Render one asset and populate its controls."""
+        self._stop_animation()
         self.current_asset = asset
         self.variant_values = {
             name: asset.parameters.get(name, values[0] if values else 0)
@@ -506,7 +540,28 @@ class MainWindow(QMainWindow):
         while self.variant_form.rowCount():
             self.variant_form.removeRow(0)
         self.variant_controls.clear()
+        self.animation_parameter = next(
+            (
+                name
+                for name in ("frame", "phase", "animation_time")
+                if name in asset.variants
+            ),
+            None,
+        )
+        self.frame_combo.blockSignals(True)
+        self.frame_combo.clear()
+        if self.animation_parameter is not None:
+            for value in asset.variants[self.animation_parameter]:
+                self.frame_combo.addItem(
+                    self._animation_frame_label(self.animation_parameter, value), value
+                )
+            current = self.variant_values.get(self.animation_parameter)
+            self.frame_combo.setCurrentIndex(max(0, self.frame_combo.findData(current)))
+        self.frame_combo.blockSignals(False)
+        self.animation_group.setVisible(self.animation_parameter is not None)
         for name, values in asset.variants.items():
+            if name == self.animation_parameter:
+                continue
             combo = QComboBox()
             for value in values:
                 combo.addItem(str(value), value)
@@ -516,7 +571,13 @@ class MainWindow(QMainWindow):
             combo.currentIndexChanged.connect(self._variant_changed)
             self.variant_form.addRow(name, combo)
             self.variant_controls[name] = combo
-        self.variant_group.setVisible(bool(asset.variants))
+        self.variant_group.setVisible(bool(self.variant_controls))
+
+    def _animation_frame_label(self, parameter: str, value: Any) -> str:
+        """Return a readable inferred frame label."""
+        if parameter == "animation_time":
+            return f"{value} ms"
+        return f"Frame {value}"
 
     def _variant_changed(self) -> None:
         """Render the newly selected parameter variant."""
@@ -532,6 +593,101 @@ class MainWindow(QMainWindow):
             self.variant_values[name] = combo.currentData()
         self._render_current()
 
+    def _animation_frame_changed(self) -> None:
+        """Render the selected animation frame."""
+        if self.animation_parameter is None or self.frame_combo.currentIndex() < 0:
+            return
+        if self._dirty and not self._confirm_discard():
+            self.frame_combo.blockSignals(True)
+            self.frame_combo.setCurrentIndex(
+                max(
+                    0,
+                    self.frame_combo.findData(
+                        self.variant_values.get(self.animation_parameter)
+                    ),
+                )
+            )
+            self.frame_combo.blockSignals(False)
+            self._stop_animation()
+            return
+        self.variant_values[self.animation_parameter] = self.frame_combo.currentData()
+        self._render_current()
+
+    def _previous_animation_frame(self) -> None:
+        """Select the preceding animation frame."""
+        count = self.frame_combo.count()
+        if count:
+            self.frame_combo.setCurrentIndex(
+                (self.frame_combo.currentIndex() - 1) % count
+            )
+
+    def _next_animation_frame(self) -> None:
+        """Select the following animation frame."""
+        count = self.frame_combo.count()
+        if count:
+            self.frame_combo.setCurrentIndex(
+                (self.frame_combo.currentIndex() + 1) % count
+            )
+
+    def _toggle_animation(self, playing: bool) -> None:
+        """Start or stop animation preview playback."""
+        if playing and self._dirty:
+            self.statusBar().showMessage(
+                "Apply or discard the current frame edit before playback."
+            )
+            self._stop_animation()
+            return
+        self.play_button.setText("Stop" if playing else "Play")
+        if playing and self.frame_combo.count() > 1:
+            self.animation_timer.start()
+        else:
+            self.animation_timer.stop()
+            if playing:
+                self.play_button.blockSignals(True)
+                self.play_button.setChecked(False)
+                self.play_button.blockSignals(False)
+                self.play_button.setText("Play")
+
+    def _advance_animation(self) -> None:
+        """Advance playback to the next frame."""
+        if self._dirty:
+            self._stop_animation()
+            return
+        self._next_animation_frame()
+
+    def _stop_animation(self) -> None:
+        """Stop frame preview playback."""
+        self.animation_timer.stop()
+        self.play_button.blockSignals(True)
+        self.play_button.setChecked(False)
+        self.play_button.blockSignals(False)
+        self.play_button.setText("Play")
+
+    def _update_onion_skin(self) -> None:
+        """Overlay the preceding animation frame when requested."""
+        if (
+            not self.onion_skin_check.isChecked()
+            or self.current_asset is None
+            or self.animation_parameter is None
+            or self.frame_combo.count() < 2
+        ):
+            self.canvas.set_onion_art(None)
+            return
+        current_index = self.frame_combo.currentIndex()
+        if current_index <= 0:
+            self.canvas.set_onion_art(None)
+            return
+        previous_values = dict(self.variant_values)
+        previous_values[self.animation_parameter] = self.frame_combo.itemData(
+            current_index - 1
+        )
+        try:
+            previous_trace = self.tracer.render(self.current_asset, previous_values)
+        except Exception:
+            self.canvas.set_onion_art(None)
+            return
+        self.canvas.set_onion_art(previous_trace.current_art)
+
     def _render_current(self) -> None:
         """Trace and display the current graphics function."""
         if self.current_asset is None:
@@ -546,12 +702,17 @@ class MainWindow(QMainWindow):
         self._suppress_changes = True
         self.canvas.set_art(trace.current_art)
         self._suppress_changes = False
+        self._update_onion_skin()
         self._dirty = False
         self._update_palette(trace.current_art)
         self._update_preview()
         notes = trace.warnings[:20]
         if not trace.primitives:
             notes.insert(0, "No supported drawing calls rendered for this variant.")
+        if self.animation_parameter is not None:
+            notes.append(
+                "Edit one frame at a time and apply it before selecting another frame."
+            )
         self.warning_text.setPlainText(
             "\n".join(notes) if notes else "Ready for pixel editing."
         )
@@ -785,6 +946,10 @@ class MainWindow(QMainWindow):
 
     def _clear_editor(self) -> None:
         """Reset the canvas and inspector for no results."""
+        self._stop_animation()
+        self.animation_parameter = None
+        self.animation_group.setVisible(False)
+        self.onion_skin_check.setChecked(False)
         self._suppress_changes = True
         self.canvas.set_art(PixelArt(32, 32))
         self._suppress_changes = False
