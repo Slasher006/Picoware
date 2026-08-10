@@ -71,6 +71,8 @@ class WindowTests(unittest.TestCase):
             [self.window.workspace_tabs.tabText(index) for index in range(3)],
             ["Pixel Art", "App GUI", "Screen Flow"],
         )
+        self.assertTrue(self.window.import_existing_app_action.isEnabled())
+        self.assertFalse(self.window.apply_imported_app_action.isEnabled())
 
     def test_animation_frames_can_be_duplicated_and_reordered(self) -> None:
         """Duplicate a source frame and change playback order."""

@@ -61,6 +61,12 @@ class GuiElement:
     text_color: int = 0xFFFF
     visible: bool = True
     asset_call: str = ""
+    locked: bool = False
+    source_path: str = ""
+    source_line: int = 0
+    source_call: str = ""
+    source_segment: str = ""
+    source_values: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def create(cls, kind: str, index: int) -> GuiElement:
@@ -107,6 +113,10 @@ class ScreenDesign:
     elements: list[GuiElement] = field(default_factory=list)
     node_x: int = 80
     node_y: int = 80
+    source_path: str = ""
+    source_name: str = ""
+    source_line: int = 0
+    source_state: Any = None
 
     @classmethod
     def create(cls, name: str, width: int, height: int, index: int) -> ScreenDesign:
@@ -142,6 +152,12 @@ class FlowConnection:
     condition: str = ""
     action: str = ""
     transition: str = "replace"
+    locked: bool = False
+    source_path: str = ""
+    source_line: int = 0
+    source_trigger_segment: str = ""
+    source_assignment_segment: str = ""
+    source_values: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def create(cls, source_id: str, target_id: str, trigger: str) -> FlowConnection:
@@ -167,6 +183,8 @@ class GuiProject:
     connections: list[FlowConnection] = field(default_factory=list)
     start_screen_id: str = ""
     format_version: int = 1
+    import_root: str = ""
+    imported_sources: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def create(
@@ -193,6 +211,11 @@ class GuiProject:
             connections,
             str(values.get("start_screen_id", "")),
             int(values.get("format_version", 1)),
+            str(values.get("import_root", "")),
+            {
+                str(path): str(digest)
+                for path, digest in values.get("imported_sources", {}).items()
+            },
         )
         if not project.screens:
             project.screens.append(

@@ -41,6 +41,12 @@ from PySide6.QtWidgets import (
 )
 
 from .canvas import PixelCanvas, pixel_art_image, qcolor_from_rgb565
+from .app_importer import (
+    AppImportResult,
+    ExistingAppImporter,
+    build_imported_app_patches,
+    refresh_import_metadata,
+)
 from .designer import DesignerSession, ScreenDesignerWidget, ScreenFlowWidget
 from .designer_model import GuiProject, backup_project, build_designer_patch
 from .model import PixelArt, rgb_to_rgb565
@@ -186,6 +192,132 @@ class NewGraphicDialog(QDialog):
         )
 
 
+class AppImportTargetDialog(QDialog):
+    """Choose an existing Python application file or folder."""
+
+    def __init__(self, parent: QWidget | None = None):
+        """Build file and folder selection controls."""
+        super().__init__(parent)
+        self.setWindowTitle("Import existing application")
+        self.selected_path: Path | None = None
+        layout = QVBoxLayout(self)
+        explanation = QLabel(
+            "Choose one Python app file or an application folder. Source is parsed but never executed."
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        self.path_label = QLabel("No application selected")
+        self.path_label.setWordWrap(True)
+        self.path_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self.path_label)
+        choices = QHBoxLayout()
+        file_button = QPushButton("Choose Python file...")
+        folder_button = QPushButton("Choose app folder...")
+        file_button.clicked.connect(self._choose_file)
+        folder_button.clicked.connect(self._choose_folder)
+        choices.addWidget(file_button)
+        choices.addWidget(folder_button)
+        layout.addLayout(choices)
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Scan app")
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def _choose_file(self) -> None:
+        """Choose one Python application file."""
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Choose Python app", str(Path.cwd()), "Python files (*.py)"
+        )
+        if filename:
+            self._set_path(Path(filename))
+
+    def _choose_folder(self) -> None:
+        """Choose one Python application folder."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose app folder", str(Path.cwd())
+        )
+        if folder:
+            self._set_path(Path(folder))
+
+    def _set_path(self, path: Path) -> None:
+        """Set the chosen import path."""
+        self.selected_path = path
+        self.path_label.setText(str(path))
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(True)
+
+
+class AppImportReviewDialog(QDialog):
+    """Review existing-app discovery before opening it."""
+
+    def __init__(self, result: AppImportResult, parent: QWidget | None = None):
+        """Build import counts and scanner warning review."""
+        super().__init__(parent)
+        self.setWindowTitle("Review app import")
+        self.resize(760, 560)
+        layout = QVBoxLayout(self)
+        summary = QLabel(
+            f"{result.files_scanned} Python files scanned\n"
+            f"{len(result.project.screens)} screens and "
+            f"{len(result.project.connections)} relations found\n"
+            f"{result.editable_count} editable elements, "
+            f"{result.locked_count} locked code elements"
+        )
+        layout.addWidget(summary)
+        notes = QPlainTextEdit()
+        notes.setReadOnly(True)
+        notes.setPlainText(
+            "\n".join(result.warnings) if result.warnings else "No import warnings."
+        )
+        layout.addWidget(notes, 1)
+        safety = QLabel(
+            "Locked elements remain visible but are never rewritten. Editable calls retain exact source anchors."
+        )
+        safety.setWordWrap(True)
+        layout.addWidget(safety)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Open in designer")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class MultiPatchDialog(QDialog):
+    """Review source patches spanning imported application files."""
+
+    def __init__(self, patches: list[SourcePatch], parent: QWidget | None = None):
+        """Build a combined multi-file diff confirmation dialog."""
+        super().__init__(parent)
+        self.setWindowTitle("Review existing app changes")
+        self.resize(1080, 760)
+        layout = QVBoxLayout(self)
+        change_count = sum(patch.run_count for patch in patches)
+        layout.addWidget(
+            QLabel(
+                f"{len(patches)} Python files contain {change_count} source-backed changes."
+            )
+        )
+        editor = QPlainTextEdit()
+        editor.setReadOnly(True)
+        editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        editor.setPlainText("\n".join(patch.diff for patch in patches))
+        layout.addWidget(editor, 1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Apply
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
 class MainWindow(QMainWindow):
     """Provide source discovery and mouse pixel editing."""
 
@@ -198,6 +330,7 @@ class MainWindow(QMainWindow):
         self.tracer = TraceInterpreter()
         self.thumbnail_tracer = TraceInterpreter(800, 300, 48)
         self.exporter = SourceExporter()
+        self.app_importer = ExistingAppImporter()
         self.designer_session = DesignerSession(self)
         self.assets: list[GraphicsAsset] = []
         self.current_asset: GraphicsAsset | None = None
@@ -277,6 +410,9 @@ class MainWindow(QMainWindow):
         self.save_gui_action.setShortcut(QKeySequence("Ctrl+Alt+S"))
         self.save_gui_as_action = QAction("Save GUI Project As...", self)
         self.export_gui_action = QAction("Export GUI to Python...", self)
+        self.import_existing_app_action = QAction("Import Existing App...", self)
+        self.apply_imported_app_action = QAction("Apply Edits to Existing App...", self)
+        self.apply_imported_app_action.setEnabled(False)
 
     def _build_interface(self) -> None:
         """Build the catalogue, canvas, and inspector."""
@@ -307,6 +443,10 @@ class MainWindow(QMainWindow):
                 self.save_gui_action,
                 self.save_gui_as_action,
             )
+        )
+        gui_menu.addSeparator()
+        gui_menu.addActions(
+            (self.import_existing_app_action, self.apply_imported_app_action)
         )
         gui_menu.addSeparator()
         gui_menu.addAction(self.export_gui_action)
@@ -644,9 +784,12 @@ class MainWindow(QMainWindow):
         self.save_gui_action.triggered.connect(self._save_gui_project)
         self.save_gui_as_action.triggered.connect(self._save_gui_project_as)
         self.export_gui_action.triggered.connect(self._export_gui_python)
+        self.import_existing_app_action.triggered.connect(self._import_existing_app)
+        self.apply_imported_app_action.triggered.connect(self._apply_imported_app_edits)
         self.workspace_tabs.currentChanged.connect(self._workspace_changed)
         self.screen_flow.open_screen_requested.connect(self._open_designed_screen)
         self.designer_session.dirty_changed.connect(self._designer_dirty_changed)
+        self.designer_session.project_changed.connect(self._update_import_actions)
 
     def _open_file(self) -> None:
         """Prompt for one Python source file."""
@@ -974,6 +1117,129 @@ class MainWindow(QMainWindow):
             return False
         self.statusBar().showMessage(f"Saved GUI project: {path}")
         return True
+
+    def _import_existing_app(self) -> None:
+        """Scan an existing Python app into source-backed GUI screens."""
+        if not self._confirm_designer_discard():
+            return
+        target_dialog = AppImportTargetDialog(self)
+        if target_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        path = target_dialog.selected_path
+        if path is None:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.statusBar().showMessage(f"Scanning existing app: {path}")
+        QApplication.processEvents()
+        try:
+            result = self.app_importer.import_path(
+                path, self.designer_session.project.profile
+            )
+        except (OSError, SyntaxError, ValueError) as error:
+            QMessageBox.critical(self, "App import failed", str(error))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        review = AppImportReviewDialog(result, self)
+        if review.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.designer_session.set_project(result.project)
+        self.designer_session.mark_changed(False)
+        self.workspace_tabs.setCurrentIndex(1)
+        self.statusBar().showMessage(
+            f"Imported {len(result.project.screens)} screens from {path}."
+        )
+
+    def _apply_imported_app_edits(self) -> None:
+        """Review and apply narrow patches to an imported application."""
+        project = self.designer_session.project
+        if not project.imported_sources:
+            QMessageBox.information(
+                self,
+                "No imported app",
+                "Import an existing application before applying source-backed edits.",
+            )
+            return
+        try:
+            patches = build_imported_app_patches(project)
+        except (OSError, SyntaxError, ValueError) as error:
+            QMessageBox.critical(self, "Cannot build app patches", str(error))
+            return
+        if not patches:
+            QMessageBox.information(
+                self,
+                "No source changes",
+                "No editable imported calls or relations have changed.",
+            )
+            return
+        review = MultiPatchDialog(patches, self)
+        if review.exec() != QDialog.DialogCode.Accepted:
+            return
+        for patch in patches:
+            try:
+                current = patch.path.read_text(encoding="utf-8")
+            except OSError as error:
+                QMessageBox.critical(self, "Cannot verify app source", str(error))
+                return
+            if current != patch.original:
+                QMessageBox.warning(
+                    self,
+                    "App source changed",
+                    f"{patch.path} changed while the diff was open. Import it again.",
+                )
+                return
+        backup_root = (
+            Path(
+                QStandardPaths.writableLocation(
+                    QStandardPaths.StandardLocation.AppDataLocation
+                )
+            )
+            / "backups"
+        )
+        backups: list[Path] = []
+        applied: list[SourcePatch] = []
+        try:
+            for patch in patches:
+                backup = patch.apply(backup_root)
+                if backup is not None:
+                    backups.append(backup)
+                applied.append(patch)
+        except (OSError, SyntaxError, ValueError) as error:
+            restored = 0
+            for patch in reversed(applied):
+                try:
+                    rollback = SourcePatch(
+                        patch.path,
+                        patch.updated,
+                        patch.original,
+                        "",
+                        "rollback",
+                        0,
+                    )
+                    rollback.apply(backup_root)
+                    restored += 1
+                except (OSError, SyntaxError, ValueError):
+                    break
+            QMessageBox.critical(
+                self,
+                "Existing app update failed",
+                f"Applied {len(applied)} of {len(patches)} files and restored {restored}.\n{error}",
+            )
+            return
+        refresh_import_metadata(project, patches)
+        self.designer_session.mark_changed(False)
+        detail = f"{len(backups)} backups created in {backup_root}."
+        QMessageBox.information(
+            self,
+            "Existing app updated",
+            f"Updated {len(patches)} Python files.\n{detail}",
+        )
+
+    def _update_import_actions(self) -> None:
+        """Enable existing-app actions for imported projects."""
+        self.apply_imported_app_action.setEnabled(
+            bool(self.designer_session.project.imported_sources)
+        )
 
     def _export_gui_python(self) -> None:
         """Review and export the GUI design as marked Python code."""

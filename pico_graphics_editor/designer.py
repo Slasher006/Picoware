@@ -193,6 +193,14 @@ def draw_element(
             QRectF(element.x + element.width - 5, element.y + element.height - 5, 7, 7),
             QColor("#00aaff"),
         )
+    if element.locked:
+        painter.setPen(QPen(QColor("#ff9800"), 1, Qt.PenStyle.DashLine))
+        painter.drawRect(rectangle.adjusted(1, 1, -1, -1))
+        painter.drawText(
+            rectangle.adjusted(3, 2, -3, -2),
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
+            "CODE",
+        )
 
 
 class DesignCanvas(QWidget):
@@ -274,13 +282,21 @@ class DesignCanvas(QWidget):
             return
         self.selected_id = element.id
         self.element_selected.emit(element.id)
+        if element.locked:
+            self._drag_mode = ""
+            self.update()
+            return
         resize_area = QRectF(
             element.x + element.width - 8,
             element.y + element.height - 8,
             12,
             12,
         )
-        self._drag_mode = "resize" if resize_area.contains(point) else "move"
+        source_call = str(element.source_values.get("call_type", ""))
+        can_resize = not (element.source_path and source_call == "text")
+        self._drag_mode = (
+            "resize" if can_resize and resize_area.contains(point) else "move"
+        )
         self._drag_offset = QPointF(point.x() - element.x, point.y() - element.y)
         self.update()
 
@@ -403,6 +419,9 @@ class ScreenDesignerWidget(QWidget):
         self.zoom_spin.setValue(180)
         self.zoom_spin.setSuffix("%")
         project_row.addWidget(self.zoom_spin)
+        self.import_mode_label = QLabel()
+        self.import_mode_label.setStyleSheet("color: #ef6c00; font-weight: 600;")
+        project_row.addWidget(self.import_mode_label)
         layout.addLayout(project_row)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -458,6 +477,10 @@ class ScreenDesignerWidget(QWidget):
         right_layout.addWidget(self.element_list, 1)
         self.delete_element_button = QPushButton("Delete selected element")
         right_layout.addWidget(self.delete_element_button)
+        self.source_notice_label = QLabel()
+        self.source_notice_label.setWordWrap(True)
+        self.source_notice_label.setStyleSheet("color: #ef6c00;")
+        right_layout.addWidget(self.source_notice_label)
         self.screen_group = QGroupBox("Screen properties")
         screen_form = QFormLayout(self.screen_group)
         self.screen_name_edit = QLineEdit()
@@ -563,11 +586,16 @@ class ScreenDesignerWidget(QWidget):
         custom = project.profile == "Custom"
         self.project_width_spin.setEnabled(custom)
         self.project_height_spin.setEnabled(custom)
+        self.import_mode_label.setText(
+            "SOURCE-BACKED APP" if project.imported_sources else ""
+        )
         self.screen_list.clear()
         selected_row = 0
         for index, screen in enumerate(project.screens):
             item = QListWidgetItem(screen.name)
             item.setData(Qt.ItemDataRole.UserRole, screen.id)
+            if screen.source_path:
+                item.setToolTip(f"{screen.source_path}:{screen.source_line}")
             self.screen_list.addItem(item)
             if screen.id == self.session.active_screen_id:
                 selected_row = index
@@ -620,8 +648,20 @@ class ScreenDesignerWidget(QWidget):
         duplicate.name = f"{source.name} Copy"
         duplicate.node_x += 40
         duplicate.node_y += 40
+        duplicate.source_path = ""
+        duplicate.source_name = ""
+        duplicate.source_line = 0
+        duplicate.source_state = None
+        duplicate.elements = [
+            element for element in duplicate.elements if not element.locked
+        ]
         for element in duplicate.elements:
             element.id = new_identifier("element")
+            element.source_path = ""
+            element.source_line = 0
+            element.source_call = ""
+            element.source_segment = ""
+            element.source_values.clear()
         self.session.project.screens.append(duplicate)
         self.session.active_screen_id = duplicate.id
         self.session.mark_changed()
@@ -635,6 +675,13 @@ class ScreenDesignerWidget(QWidget):
             )
             return
         screen = self.session.current_screen()
+        if screen.source_path:
+            QMessageBox.information(
+                self,
+                "Source screen retained",
+                "Imported source screens cannot be deleted automatically.",
+            )
+            return
         answer = QMessageBox.question(
             self,
             "Delete screen?",
@@ -668,6 +715,14 @@ class ScreenDesignerWidget(QWidget):
         if self.selected_element_id is None:
             return
         screen = self.session.current_screen()
+        selected = self._selected_element()
+        if selected is not None and selected.source_path:
+            QMessageBox.information(
+                self,
+                "Source element retained",
+                "Imported source calls cannot be deleted. Set Visible off for editable calls.",
+            )
+            return
         screen.elements = [
             item for item in screen.elements if item.id != self.selected_element_id
         ]
@@ -679,8 +734,14 @@ class ScreenDesignerWidget(QWidget):
         self.element_list.clear()
         selected_row = -1
         for index, element in enumerate(self.session.current_screen().elements):
-            item = QListWidgetItem(f"{element.kind}: {element.name}")
+            prefix = "[code] " if element.locked else ""
+            item = QListWidgetItem(f"{prefix}{element.kind}: {element.name}")
             item.setData(Qt.ItemDataRole.UserRole, element.id)
+            if element.source_path:
+                state = (
+                    "Locked dynamic code" if element.locked else "Editable source call"
+                )
+                item.setToolTip(f"{state}\n{element.source_path}:{element.source_line}")
             self.element_list.addItem(item)
             if element.id == self.selected_element_id:
                 selected_row = index
@@ -731,23 +792,55 @@ class ScreenDesignerWidget(QWidget):
         self.screen_background_button.setStyleSheet(
             f"background: {qcolor_from_rgb565(screen.background_color).name()};"
         )
+        self.screen_background_button.setEnabled(not bool(screen.source_path))
+        self.screen_background_button.setToolTip(
+            "Edit the imported background draw element instead."
+            if screen.source_path
+            else "Choose the designer screen background."
+        )
 
     def _refresh_element_properties(self) -> None:
         """Refresh controls for the selected element."""
         element = self._selected_element()
-        self.property_group.setEnabled(element is not None)
+        self.property_group.setEnabled(element is not None and not element.locked)
+        self.delete_element_button.setEnabled(
+            element is not None and not bool(element.source_path)
+        )
         if element is None:
+            self.source_notice_label.clear()
             return
+        if element.locked:
+            self.source_notice_label.setText(
+                f"Locked dynamic code. Preserved unchanged.\n{element.source_path}:{element.source_line}"
+            )
+        elif element.source_path:
+            self.source_notice_label.setText(
+                f"Editable source call. Changes create a narrow patch.\n{element.source_path}:{element.source_line}"
+            )
+        else:
+            self.source_notice_label.clear()
         self.element_name_edit.setText(element.name)
         self.kind_combo.setCurrentIndex(max(0, self.kind_combo.findData(element.kind)))
+        self.kind_combo.setEnabled(not bool(element.source_path))
         self.x_spin.setValue(element.x)
         self.y_spin.setValue(element.y)
         self.width_spin.setValue(element.width)
         self.height_spin.setValue(element.height)
         self.element_text_edit.setText(element.text.replace("\n", "\\n"))
         self.asset_call_edit.setText(element.asset_call)
+        self.asset_call_edit.setEnabled(not bool(element.source_path))
         self.visible_check.setChecked(element.visible)
         self._update_color_buttons(element)
+        source_call = str(element.source_values.get("call_type", ""))
+        source_backed = bool(element.source_path)
+        self.width_spin.setEnabled(not source_backed or source_call != "text")
+        self.height_spin.setEnabled(not source_backed or source_call != "text")
+        self.element_text_edit.setEnabled(not source_backed or source_call == "text")
+        self.fill_color_button.setEnabled(
+            not source_backed or source_call == "fill_rect"
+        )
+        self.border_color_button.setEnabled(not source_backed or source_call == "rect")
+        self.text_color_button.setEnabled(not source_backed or source_call == "text")
 
     def _canvas_geometry_changed(self) -> None:
         """Refresh geometry fields after direct manipulation."""
@@ -817,7 +910,7 @@ class ScreenDesignerWidget(QWidget):
         if self._updating:
             return
         element = self._selected_element()
-        if element is None:
+        if element is None or element.locked:
             return
         element.name = self.element_name_edit.text().strip() or element.name
         element.kind = str(self.kind_combo.currentData())
@@ -1009,6 +1102,8 @@ class FlowCanvas(QWidget):
         painter.drawText(
             rectangle.adjusted(8, 8, -8, -8), Qt.AlignmentFlag.AlignCenter, screen.name
         )
+        if screen.source_path:
+            painter.drawText(QPointF(screen.node_x + 6, screen.node_y + 62), "SOURCE")
         if start:
             painter.drawText(QPointF(screen.node_x + 6, screen.node_y + 14), "START")
 
@@ -1022,7 +1117,8 @@ class FlowCanvas(QWidget):
         """Draw one labeled directional graph edge."""
         start = QPointF(source.node_x + 160, source.node_y + 35)
         end = QPointF(target.node_x, target.node_y + 35)
-        painter.setPen(QPen(QColor("#88c0d0"), 2))
+        edge_color = QColor("#ff9800") if connection.locked else QColor("#88c0d0")
+        painter.setPen(QPen(edge_color, 2))
         painter.drawLine(start, end)
         direction = end - start
         length = max(1.0, (direction.x() ** 2 + direction.y() ** 2) ** 0.5)
@@ -1035,7 +1131,7 @@ class FlowCanvas(QWidget):
                 end - unit * 12 - normal * 5,
             ]
         )
-        painter.setBrush(QColor("#88c0d0"))
+        painter.setBrush(edge_color)
         painter.drawPolygon(arrow)
         midpoint = (start + end) / 2
         painter.setPen(QColor("#eceff4"))
@@ -1161,15 +1257,23 @@ class ScreenFlowWidget(QWidget):
         self._restore_combo(self.source_combo, selected_source)
         self._restore_combo(self.target_combo, selected_target)
         self.connection_list.clear()
+        self.update_relation_button.setEnabled(True)
+        self.delete_relation_button.setEnabled(True)
+        self._set_relation_fields_enabled(True, False)
         for connection in self.session.project.connections:
             source = self.session.project.screen(connection.source_id)
             target = self.session.project.screen(connection.target_id)
             if source is None or target is None:
                 continue
+            prefix = "[code] " if connection.source_path else ""
+            if connection.locked:
+                prefix = "[locked] "
             item = QListWidgetItem(
-                f"{source.name} -- {connection.trigger} --> {target.name}"
+                f"{prefix}{source.name} -- {connection.trigger} --> {target.name}"
             )
             item.setData(Qt.ItemDataRole.UserRole, connection.id)
+            if connection.source_path:
+                item.setToolTip(f"{connection.source_path}:{connection.source_line}")
             self.connection_list.addItem(item)
         if self.session.project.screen(self.simulated_screen_id) is None:
             self.simulated_screen_id = self.session.project.start_screen_id
@@ -1202,20 +1306,37 @@ class ScreenFlowWidget(QWidget):
     def _update_relation(self) -> None:
         """Update the selected relationship."""
         connection = self._selected_connection()
-        if connection is None:
+        if connection is None or connection.locked:
             return
-        connection.source_id = str(self.source_combo.currentData())
-        connection.target_id = str(self.target_combo.currentData())
+        target_id = str(self.target_combo.currentData())
+        target = self.session.project.screen(target_id)
+        if connection.source_path and (target is None or target.source_state is None):
+            QMessageBox.information(
+                self,
+                "Target is design-only",
+                "An imported relation needs a target with a source state.",
+            )
+            return
+        connection.target_id = target_id
         connection.trigger = self.trigger_edit.text().strip() or connection.trigger
-        connection.condition = self.condition_edit.text().strip()
-        connection.action = self.action_edit.text().strip()
-        connection.transition = self.transition_combo.currentText()
+        if not connection.source_path:
+            connection.source_id = str(self.source_combo.currentData())
+            connection.condition = self.condition_edit.text().strip()
+            connection.action = self.action_edit.text().strip()
+            connection.transition = self.transition_combo.currentText()
         self.session.mark_changed()
 
     def _delete_relation(self) -> None:
         """Delete the selected relationship."""
         connection = self._selected_connection()
         if connection is None:
+            return
+        if connection.source_path:
+            QMessageBox.information(
+                self,
+                "Source relation retained",
+                "Imported source relations cannot be deleted automatically.",
+            )
             return
         self.session.project.connections = [
             item
@@ -1231,12 +1352,25 @@ class ScreenFlowWidget(QWidget):
         connection = self._selected_connection()
         if connection is None:
             return
+        self.update_relation_button.setEnabled(not connection.locked)
+        self.delete_relation_button.setEnabled(not bool(connection.source_path))
         self._restore_combo(self.source_combo, connection.source_id)
         self._restore_combo(self.target_combo, connection.target_id)
         self.trigger_edit.setText(connection.trigger)
         self.condition_edit.setText(connection.condition)
         self.action_edit.setText(connection.action)
         self.transition_combo.setCurrentText(connection.transition)
+        source_backed = bool(connection.source_path)
+        self._set_relation_fields_enabled(not connection.locked, source_backed)
+
+    def _set_relation_fields_enabled(self, editable: bool, source_backed: bool) -> None:
+        """Limit relation controls to fields that can reach source code."""
+        self.source_combo.setEnabled(editable and not source_backed)
+        self.target_combo.setEnabled(editable)
+        self.trigger_edit.setEnabled(editable)
+        self.condition_edit.setEnabled(editable and not source_backed)
+        self.action_edit.setEnabled(editable and not source_backed)
+        self.transition_combo.setEnabled(editable and not source_backed)
 
     def _selected_connection(self) -> FlowConnection | None:
         """Return the selected graph relationship."""

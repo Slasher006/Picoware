@@ -81,6 +81,16 @@ Elements can be selected, dragged, resized, renamed, hidden, recolored, and posi
 
 Use **GUI Project** in the menu bar to create, open, save, or export a project. Python export generates one marked renderer class containing screen draw methods and navigation handling. Re-export replaces only that marked block.
 
+### Editing existing applications
+
+Choose **GUI Project > Import Existing App...** and select one Python file or an application folder. The importer safely parses the source, discovers drawing functions and state-based screens, and infers simple navigation relations across files without importing or running the application.
+
+Direct rectangle and text calls with static arguments become draggable source-backed elements. Runtime-dependent loops, branches, helpers, positions, and other expressions remain visible as orange `[code]` elements. These locked elements cannot be moved or rewritten, so application logic is preserved.
+
+Editable inferred relations can change a simple event value or target state. Relations based on complex runtime conditions are marked `[locked]`. New screens, elements, and relations may still be added to the designer project, but only items with an imported source anchor are written back to the existing application.
+
+Use **GUI Project > Apply Edits to Existing App...** to review a combined multi-file diff. The editor refuses to apply if any source file changed since import, parses every proposed result, rechecks the files after the review dialog, and creates timestamped backups before writing. Save the companion `*.picogui.json` project to retain layout and import metadata between sessions.
+
 ## Screen Flow workspace
 
 Every application screen is represented as a draggable node. Directed relations define:
@@ -116,6 +126,8 @@ The profile works with direct calls such as `self.draw._fill_rectangle(...)` and
 - The complete diff is shown before writing.
 - Every applied edit creates a timestamped backup in the operating system's application-data folder.
 - The resulting Python is parsed before it replaces the source file.
+- Existing-app edits replace only exact imported source anchors.
+- Dynamic existing-app code remains locked and unchanged.
 - GUI projects remain separate from generated Python, allowing safe regeneration.
 - New Python destinations are written atomically after review.
 
@@ -125,4 +137,4 @@ Arbitrary Python cannot always be reconstructed as editable graphics. Runtime ga
 
 Transparent erasing cannot remove an existing procedural draw operation. Set the eraser to the intended local background color instead. Large pixel changes can also generate substantial Python source, so the diff reports the number of compressed runs before applying.
 
-Existing arbitrary application Python cannot always be reconstructed into draggable GUI elements. The GUI workspace therefore uses its JSON project as the editable source of truth and confines generated Python to clearly marked sections.
+Existing arbitrary application Python cannot always be reconstructed into draggable GUI elements. The existing-app importer edits only static supported draw calls and simple inferred state transitions; everything else remains a locked visual placeholder. The GUI workspace keeps its JSON project as the complete editable design source.
