@@ -88,9 +88,11 @@ class WindowTests(unittest.TestCase):
         self.window.designer_session.set_project(GuiProject.create())
 
     def test_dirty_gui_project_writes_and_clears_recovery(self) -> None:
-        """Autosave dirty GUI data and remove it after explicit save."""
+        """Keep a safety backup after clearing an explicit save recovery."""
         recovery_path = Path(self.temporary.name) / "recovery.picogui.json"
+        backup_root = Path(self.temporary.name) / "backups"
         self.window._designer_recovery_path = lambda: recovery_path
+        self.window._gui_backup_root = lambda: backup_root
         self.window.screen_designer._add_element("button")
         self.window._write_designer_recovery()
         recovered = GuiProject.load(recovery_path)
@@ -98,6 +100,11 @@ class WindowTests(unittest.TestCase):
         project_path = Path(self.temporary.name) / "saved.picogui.json"
         self.assertTrue(self.window._save_gui_project_to(project_path))
         self.assertFalse(recovery_path.exists())
+        backups = list(backup_root.glob("saved.picogui.json.*.bak"))
+        self.assertEqual(len(backups), 1)
+        project_path.unlink()
+        restored = GuiProject.load(backups[0])
+        self.assertEqual(len(restored.screens[0].elements), 1)
 
     def test_animation_frames_can_be_duplicated_and_reordered(self) -> None:
         """Duplicate a source frame and change playback order."""

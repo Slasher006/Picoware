@@ -416,6 +416,7 @@ class MainWindow(QMainWindow):
         self.save_gui_action = QAction("Save GUI Project", self)
         self.save_gui_action.setShortcut(QKeySequence("Ctrl+Alt+S"))
         self.save_gui_as_action = QAction("Save GUI Project As...", self)
+        self.recover_saved_gui_action = QAction("Recover Saved GUI Backup...", self)
         self.export_gui_action = QAction("Export GUI to Python...", self)
         self.import_existing_app_action = QAction("Import Existing App...", self)
         self.apply_imported_app_action = QAction("Apply Edits to Existing App...", self)
@@ -450,6 +451,7 @@ class MainWindow(QMainWindow):
                 self.save_gui_action,
                 self.save_gui_as_action,
                 self.recover_gui_action,
+                self.recover_saved_gui_action,
             )
         )
         gui_menu.addSeparator()
@@ -792,6 +794,7 @@ class MainWindow(QMainWindow):
         self.save_gui_action.triggered.connect(self._save_gui_project)
         self.save_gui_as_action.triggered.connect(self._save_gui_project_as)
         self.recover_gui_action.triggered.connect(self._recover_gui_project)
+        self.recover_saved_gui_action.triggered.connect(self._recover_saved_gui_project)
         self.export_gui_action.triggered.connect(self._export_gui_python)
         self.import_existing_app_action.triggered.connect(self._import_existing_app)
         self.apply_imported_app_action.triggered.connect(self._apply_imported_app_edits)
@@ -1142,24 +1145,39 @@ class MainWindow(QMainWindow):
 
     def _save_gui_project_to(self, path: Path) -> bool:
         """Save a GUI project path with error reporting."""
+        backup_root = self._gui_backup_root()
         try:
             if path.exists():
-                backup_root = (
-                    Path(
-                        QStandardPaths.writableLocation(
-                            QStandardPaths.StandardLocation.AppDataLocation
-                        )
-                    )
-                    / "backups"
-                )
                 backup_project(path, backup_root)
             self.designer_session.save(path)
         except (OSError, ValueError, TypeError) as error:
             QMessageBox.critical(self, "Cannot save GUI project", str(error))
             return False
+        try:
+            saved_backup = backup_project(path, backup_root)
+        except OSError as error:
+            QMessageBox.warning(
+                self,
+                "GUI project saved without backup",
+                f"Saved {path}, but the safety copy failed:\n{error}",
+            )
+            saved_backup = None
         self._clear_designer_recovery()
-        self.statusBar().showMessage(f"Saved GUI project: {path}")
+        detail = f" | Safety copy: {saved_backup}" if saved_backup else ""
+        self.statusBar().showMessage(f"Saved GUI project: {path}{detail}")
         return True
+
+    def _gui_backup_root(self) -> Path:
+        """Return the independent saved-project backup directory."""
+        return (
+            Path(
+                QStandardPaths.writableLocation(
+                    QStandardPaths.StandardLocation.AppDataLocation
+                )
+            )
+            / "backups"
+            / "gui-projects"
+        )
 
     def _designer_recovery_path(self) -> Path:
         """Return the autosaved GUI recovery project path."""
@@ -1204,6 +1222,30 @@ class MainWindow(QMainWindow):
         self.designer_session.mark_changed(False)
         self.workspace_tabs.setCurrentIndex(1)
         self.statusBar().showMessage(f"Recovered GUI project from {path}")
+
+    def _recover_saved_gui_project(self) -> None:
+        """Recover one independently stored explicit-save backup."""
+        backup_root = self._gui_backup_root()
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Recover saved GUI backup",
+            str(backup_root),
+            "Pico GUI backups (*.bak *.picogui.json);;All files (*)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        try:
+            project = GuiProject.load(path)
+        except (OSError, ValueError, TypeError) as error:
+            QMessageBox.critical(self, "Cannot recover GUI backup", str(error))
+            return
+        if not self._confirm_designer_discard():
+            return
+        self.designer_session.set_project(project)
+        self.designer_session.mark_changed(False)
+        self.workspace_tabs.setCurrentIndex(1)
+        self.statusBar().showMessage(f"Recovered saved GUI backup: {path}")
 
     def _clear_designer_recovery(self) -> None:
         """Remove the recovery project after a successful explicit save."""
