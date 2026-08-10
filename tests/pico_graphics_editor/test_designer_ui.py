@@ -120,8 +120,14 @@ class DesignerUiTests(unittest.TestCase):
         widget.show()
         self.application.processEvents()
         source = project.screens[0]
-        source_port = QPoint(source.node_x + 160, source.node_y + 35)
-        target_port = QPoint(target.node_x, target.node_y + 35)
+        source_port = QPoint(
+            source.node_x + widget.graph.NODE_WIDTH,
+            source.node_y + widget.graph.NODE_HEIGHT // 2,
+        )
+        target_port = QPoint(
+            target.node_x,
+            target.node_y + widget.graph.NODE_HEIGHT // 2,
+        )
         QTest.mousePress(
             widget.graph,
             Qt.MouseButton.LeftButton,
@@ -140,6 +146,84 @@ class DesignerUiTests(unittest.TestCase):
         self.assertEqual(connection.source_id, source.id)
         self.assertEqual(connection.target_id, target.id)
         self.assertEqual(connection.trigger, "open")
+        widget.close()
+
+    def test_screen_list_thumbnail_renders_screen_content(self) -> None:
+        """Render actual screen colors inside the screen list thumbnail."""
+        session = DesignerSession()
+        session.current_screen().background_color = 0xF800
+        widget = ScreenDesignerWidget(session)
+        image = widget.screen_list.item(0).icon().pixmap(76, 64).toImage()
+        center = image.pixelColor(image.width() // 2, image.height() // 2)
+        self.assertGreater(center.red(), 200)
+        self.assertLess(center.green(), 80)
+        widget.close()
+
+    def test_multi_selection_aligns_nudges_and_undoes(self) -> None:
+        """Align and move multiple selected elements with shared history."""
+        project = GuiProject.create("Layout")
+        first = GuiElement.create("button", 1)
+        second = GuiElement.create("button", 2)
+        first.y = 20
+        second.y = 80
+        project.screens[0].elements.extend((first, second))
+        session = DesignerSession()
+        session.set_project(project)
+        widget = ScreenDesignerWidget(session)
+        widget._canvas_selection_changed({first.id, second.id})
+        widget._align_selection("top")
+        self.assertEqual((first.y, second.y), (20, 20))
+        widget.canvas.setFocus()
+        QTest.keyClick(widget.canvas, Qt.Key.Key_Right)
+        self.assertEqual((first.x, second.x), (25, 33))
+        session.undo()
+        current = session.current_screen().elements
+        self.assertEqual((current[0].x, current[1].x), (24, 32))
+        session.undo()
+        current = session.current_screen().elements
+        self.assertEqual((current[0].y, current[1].y), (20, 80))
+        session.redo()
+        current = session.current_screen().elements
+        self.assertEqual((current[0].y, current[1].y), (20, 20))
+        widget.close()
+
+    def test_preview_keyboard_activates_focused_element(self) -> None:
+        """Navigate by keyboard and activate a named screen relation."""
+        project = GuiProject.create("Focus Flow")
+        button = GuiElement.create("button", 1)
+        button.name = "open_game"
+        project.screens[0].elements.append(button)
+        target = ScreenDesign.create("Game", 320, 320, 1)
+        project.screens.append(target)
+        project.connections.append(
+            FlowConnection.create(project.screens[0].id, target.id, button.name)
+        )
+        session = DesignerSession()
+        session.set_project(project)
+        widget = ScreenFlowWidget(session)
+        QTest.keyClick(widget.preview, Qt.Key.Key_Return)
+        self.assertEqual(widget.simulated_screen_id, target.id)
+        self.assertEqual(widget.simulator_event_edit.text(), "open_game")
+        widget.close()
+
+    def test_graph_edge_can_be_selected_and_deleted(self) -> None:
+        """Select a graph relation line and remove it with Delete."""
+        project = GuiProject.create("Editable Flow")
+        target = ScreenDesign.create("Game", 320, 320, 1)
+        project.screens.append(target)
+        connection = FlowConnection.create(project.screens[0].id, target.id, "open")
+        project.connections.append(connection)
+        session = DesignerSession()
+        session.set_project(project)
+        widget = ScreenFlowWidget(session)
+        source_point = widget.graph._output_port(project.screens[0])
+        target_point = widget.graph._input_port(target)
+        path, unused = widget.graph._connection_path(source_point, target_point)
+        midpoint = path.pointAtPercent(0.5).toPoint()
+        QTest.mouseClick(widget.graph, Qt.MouseButton.LeftButton, pos=midpoint)
+        self.assertEqual(widget.graph.selected_connection_id, connection.id)
+        QTest.keyClick(widget.graph, Qt.Key.Key_Delete)
+        self.assertEqual(session.project.connections, [])
         widget.close()
 
     def test_node_body_remains_mouse_draggable(self) -> None:

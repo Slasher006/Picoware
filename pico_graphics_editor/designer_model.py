@@ -67,6 +67,9 @@ class GuiElement:
     source_call: str = ""
     source_segment: str = ""
     source_values: dict[str, Any] = field(default_factory=dict)
+    editor_locked: bool = False
+    focusable: bool = False
+    focus_order: int = 0
 
     @classmethod
     def create(cls, kind: str, index: int) -> GuiElement:
@@ -83,7 +86,7 @@ class GuiElement:
             "progress": "",
         }
         normalized = kind if kind in ELEMENT_KINDS else "rectangle"
-        return cls(
+        element = cls(
             new_identifier("element"),
             normalized,
             f"{normalized}_{index}",
@@ -93,6 +96,9 @@ class GuiElement:
             heights.get(normalized, 36),
             labels.get(normalized, ""),
         )
+        element.focusable = normalized in {"button", "list", "icon"}
+        element.focus_order = index
+        return element
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> GuiElement:
@@ -126,8 +132,8 @@ class ScreenDesign:
             name,
             width,
             height,
-            node_x=70 + (index % 4) * 220,
-            node_y=70 + (index // 4) * 150,
+            node_x=70 + (index % 4) * 300,
+            node_y=70 + (index // 4) * 200,
         )
 
     @classmethod
@@ -182,7 +188,7 @@ class GuiProject:
     screens: list[ScreenDesign]
     connections: list[FlowConnection] = field(default_factory=list)
     start_screen_id: str = ""
-    format_version: int = 1
+    format_version: int = 2
     import_root: str = ""
     imported_sources: dict[str, str] = field(default_factory=dict)
 
@@ -293,6 +299,7 @@ def generate_python(project: GuiProject) -> str:
         "        self.draw = draw\n",
         f"        self.screen = {project.screen(project.start_screen_id).name!r}\n",
         '        self.last_transition = "replace"\n',
+        "        self.focus_index = 0\n",
         "\n",
         "    def render(self):\n",
         '        """Render the active generated screen."""\n',
@@ -330,6 +337,7 @@ def generate_python(project: GuiProject) -> str:
                     f"                self._run_action({connection.action!r})\n"
                 )
             lines.append(f"                self.screen = {target.name!r}\n")
+            lines.append("                self.focus_index = 0\n")
             lines.append(
                 f"                self.last_transition = {connection.transition!r}\n"
             )
@@ -347,8 +355,43 @@ def generate_python(project: GuiProject) -> str:
             "    def _run_action(self, action):\n",
             '        """Allow an application to handle a named action."""\n',
             "        return None\n",
+            "\n",
+            "    def focused_element(self):\n",
+            '        """Return the focused element event name."""\n',
+            "        elements = self._focusable_elements()\n",
+            "        if not elements:\n",
+            "            return None\n",
+            "        self.focus_index %= len(elements)\n",
+            "        return elements[self.focus_index]\n",
+            "\n",
+            "    def move_focus(self, step):\n",
+            '        """Move keyboard focus and return its event name."""\n',
+            "        elements = self._focusable_elements()\n",
+            "        if not elements:\n",
+            "            return None\n",
+            "        self.focus_index = (self.focus_index + step) % len(elements)\n",
+            "        return elements[self.focus_index]\n",
+            "\n",
+            "    def activate_focused(self):\n",
+            '        """Dispatch the focused element event when available."""\n',
+            "        event = self.focused_element()\n",
+            "        return self.handle_event(event) if event else False\n",
+            "\n",
+            "    def _focusable_elements(self):\n",
+            '        """Return ordered focusable names for the active screen."""\n',
         ]
     )
+    for index, screen in enumerate(project.screens):
+        keyword = "if" if index == 0 else "elif"
+        focusable = [
+            (element.focus_order, element_index, element.name)
+            for element_index, element in enumerate(screen.elements)
+            if element.visible and element.focusable
+        ]
+        names = tuple(item[2] for item in sorted(focusable))
+        lines.append(f"        {keyword} self.screen == {screen.name!r}:\n")
+        lines.append(f"            return {names!r}\n")
+    lines.append("        return ()\n")
     for screen in project.screens:
         lines.extend(_screen_python(screen))
     lines.append("# Pico GUI Designer end\n")

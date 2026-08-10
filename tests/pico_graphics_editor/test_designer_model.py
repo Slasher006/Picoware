@@ -29,7 +29,10 @@ class DesignerModelTests(unittest.TestCase):
     def test_project_round_trip_preserves_flow(self) -> None:
         """Save and reload screens, elements, and navigation."""
         project = GuiProject.create("Demo")
-        project.screens[0].elements.append(GuiElement.create("button", 1))
+        element = GuiElement.create("button", 1)
+        element.editor_locked = True
+        element.focus_order = 7
+        project.screens[0].elements.append(element)
         second = ScreenDesign.create("Game", 320, 320, 1)
         project.screens.append(second)
         project.connections.append(
@@ -41,16 +44,25 @@ class DesignerModelTests(unittest.TestCase):
             loaded = GuiProject.load(path)
         self.assertEqual(loaded.name, "Demo")
         self.assertEqual(loaded.screens[0].elements[0].kind, "button")
+        self.assertTrue(loaded.screens[0].elements[0].editor_locked)
+        self.assertTrue(loaded.screens[0].elements[0].focusable)
+        self.assertEqual(loaded.screens[0].elements[0].focus_order, 7)
         self.assertEqual(loaded.connections[0].trigger, "start")
 
     def test_generated_python_is_parseable(self) -> None:
         """Generate valid screen drawing and flow methods."""
         project = GuiProject.create("Pico Demo")
         project.screens[0].elements.append(GuiElement.create("label", 1))
+        button = GuiElement.create("button", 2)
+        button.name = "open_settings"
+        button.focus_order = 1
+        project.screens[0].elements.append(button)
         source = generate_python(project)
         ast.parse(source)
         self.assertIn("class Pico_Demo", source)
         self.assertIn("_fill_rectangle", source)
+        self.assertIn("def move_focus", source)
+        self.assertIn("('open_settings',)", source)
 
     def test_patch_replaces_managed_block(self) -> None:
         """Update one designer block without duplicating it."""

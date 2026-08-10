@@ -16,6 +16,7 @@ if str(REPOSITORY_PATH) not in sys.path:
 
 from PySide6.QtWidgets import QApplication
 
+from pico_graphics_editor.designer_model import GuiProject
 from pico_graphics_editor.window import MainWindow
 
 
@@ -73,6 +74,30 @@ class WindowTests(unittest.TestCase):
         )
         self.assertTrue(self.window.import_existing_app_action.isEnabled())
         self.assertFalse(self.window.apply_imported_app_action.isEnabled())
+
+    def test_designer_workspace_uses_project_undo_history(self) -> None:
+        """Route global undo and redo actions to the GUI designer."""
+        self.window.workspace_tabs.setCurrentIndex(1)
+        self.window.screen_designer._add_element("button")
+        self.assertTrue(self.window.undo_action.isEnabled())
+        self.window._undo_current()
+        self.assertEqual(self.window.designer_session.current_screen().elements, [])
+        self.assertTrue(self.window.redo_action.isEnabled())
+        self.window._redo_current()
+        self.assertEqual(len(self.window.designer_session.current_screen().elements), 1)
+        self.window.designer_session.set_project(GuiProject.create())
+
+    def test_dirty_gui_project_writes_and_clears_recovery(self) -> None:
+        """Autosave dirty GUI data and remove it after explicit save."""
+        recovery_path = Path(self.temporary.name) / "recovery.picogui.json"
+        self.window._designer_recovery_path = lambda: recovery_path
+        self.window.screen_designer._add_element("button")
+        self.window._write_designer_recovery()
+        recovered = GuiProject.load(recovery_path)
+        self.assertEqual(len(recovered.screens[0].elements), 1)
+        project_path = Path(self.temporary.name) / "saved.picogui.json"
+        self.assertTrue(self.window._save_gui_project_to(project_path))
+        self.assertFalse(recovery_path.exists())
 
     def test_animation_frames_can_be_duplicated_and_reordered(self) -> None:
         """Duplicate a source frame and change playback order."""

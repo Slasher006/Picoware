@@ -6,6 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from PySide6.QtCore import (
+    QItemSelectionModel,
     QMimeData,
     QPoint,
     QPointF,
@@ -21,15 +22,20 @@ from PySide6.QtGui import (
     QDragEnterEvent,
     QDragMoveEvent,
     QDropEvent,
+    QIcon,
     QImage,
+    QKeyEvent,
+    QKeySequence,
     QMouseEvent,
     QPainter,
     QPainterPath,
     QPen,
+    QPixmap,
     QPolygonF,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QColorDialog,
@@ -76,6 +82,7 @@ class DesignerSession(QObject):
     project_changed = Signal()
     dirty_changed = Signal(bool)
     active_screen_changed = Signal(str)
+    history_changed = Signal(bool, bool)
 
     def __init__(self, parent: QObject | None = None):
         """Initialize a new unsaved GUI project."""
@@ -84,6 +91,12 @@ class DesignerSession(QObject):
         self.path: Path | None = None
         self.dirty = False
         self.active_screen_id = self.project.start_screen_id
+        self._undo_stack: list[dict[str, object]] = []
+        self._redo_stack: list[dict[str, object]] = []
+        self._snapshot = self.project.to_dict()
+        self._saved_snapshot = self.project.to_dict()
+        self._transaction_snapshot: dict[str, object] | None = None
+        self._transaction_depth = 0
 
     def set_project(self, project: GuiProject, path: Path | None = None) -> None:
         """Replace the current project and reset edit state."""
@@ -91,9 +104,16 @@ class DesignerSession(QObject):
         self.path = path
         self.active_screen_id = project.start_screen_id
         self.dirty = False
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._snapshot = project.to_dict()
+        self._saved_snapshot = project.to_dict()
+        self._transaction_snapshot = None
+        self._transaction_depth = 0
         self.project_changed.emit()
         self.active_screen_changed.emit(self.active_screen_id)
         self.dirty_changed.emit(False)
+        self.history_changed.emit(False, False)
 
     def current_screen(self) -> ScreenDesign:
         """Return the active screen with a safe fallback."""
@@ -112,11 +132,88 @@ class DesignerSession(QObject):
 
     def mark_changed(self, refresh: bool = True) -> None:
         """Mark the project dirty and optionally refresh views."""
-        if not self.dirty:
-            self.dirty = True
-            self.dirty_changed.emit(True)
+        current = self.project.to_dict()
+        if self._transaction_depth == 0 and current != self._snapshot:
+            self._undo_stack.append(self._snapshot)
+            del self._undo_stack[:-100]
+            self._redo_stack.clear()
+            self._snapshot = current
+            self.history_changed.emit(self.can_undo(), self.can_redo())
+        self._set_dirty(True)
         if refresh:
             self.project_changed.emit()
+
+    def begin_transaction(self) -> None:
+        """Begin one coalesced direct-manipulation history change."""
+        if self._transaction_depth == 0:
+            self._transaction_snapshot = self.project.to_dict()
+        self._transaction_depth += 1
+
+    def end_transaction(self) -> None:
+        """Commit the current direct-manipulation history change."""
+        if self._transaction_depth == 0:
+            return
+        self._transaction_depth -= 1
+        if self._transaction_depth:
+            return
+        before = self._transaction_snapshot
+        self._transaction_snapshot = None
+        current = self.project.to_dict()
+        if before is not None and current != before:
+            self._undo_stack.append(before)
+            del self._undo_stack[:-100]
+            self._redo_stack.clear()
+            self._snapshot = current
+            self.history_changed.emit(self.can_undo(), self.can_redo())
+        self._set_dirty(current != self._saved_snapshot)
+
+    def can_undo(self) -> bool:
+        """Return whether a designer change can be undone."""
+        return bool(self._undo_stack)
+
+    def can_redo(self) -> bool:
+        """Return whether a designer change can be redone."""
+        return bool(self._redo_stack)
+
+    def undo(self) -> None:
+        """Restore the previous complete designer project snapshot."""
+        if not self._undo_stack:
+            return
+        current = self.project.to_dict()
+        previous = self._undo_stack.pop()
+        self._redo_stack.append(current)
+        self._restore_snapshot(previous)
+
+    def redo(self) -> None:
+        """Restore the next complete designer project snapshot."""
+        if not self._redo_stack:
+            return
+        current = self.project.to_dict()
+        following = self._redo_stack.pop()
+        self._undo_stack.append(current)
+        self._restore_snapshot(following)
+
+    def _restore_snapshot(self, values: dict[str, object]) -> None:
+        """Restore one history snapshot and notify designer views."""
+        active = self.active_screen_id
+        self.project = GuiProject.from_dict(values)
+        self.active_screen_id = (
+            active
+            if self.project.screen(active) is not None
+            else self.project.start_screen_id
+        )
+        self._snapshot = self.project.to_dict()
+        self._set_dirty(self._snapshot != self._saved_snapshot)
+        self.project_changed.emit()
+        self.active_screen_changed.emit(self.active_screen_id)
+        self.history_changed.emit(self.can_undo(), self.can_redo())
+
+    def _set_dirty(self, dirty: bool) -> None:
+        """Update and emit the designer dirty state only when changed."""
+        if self.dirty == dirty:
+            return
+        self.dirty = dirty
+        self.dirty_changed.emit(dirty)
 
     def save(self, path: str | Path | None = None) -> Path:
         """Save the project and return its path."""
@@ -125,8 +222,9 @@ class DesignerSession(QObject):
             raise ValueError("A GUI project path is required")
         self.project.save(target)
         self.path = target
-        self.dirty = False
-        self.dirty_changed.emit(False)
+        self._snapshot = self.project.to_dict()
+        self._saved_snapshot = self.project.to_dict()
+        self._set_dirty(False)
         return target
 
 
@@ -134,7 +232,7 @@ def draw_screen(
     painter: QPainter,
     screen: ScreenDesign,
     target: QRectF,
-    selected_id: str | None = None,
+    selected_id: str | set[str] | None = None,
     reference: QImage | None = None,
     reference_opacity: float = 0.45,
 ) -> None:
@@ -157,10 +255,30 @@ def draw_screen(
         painter.setOpacity(reference_opacity)
         painter.drawImage(QRectF(0, 0, screen.width, screen.height), prepared)
         painter.setOpacity(1.0)
+    selected_ids = (
+        {selected_id}
+        if isinstance(selected_id, str)
+        else selected_id
+        if selected_id is not None
+        else set()
+    )
     for element in screen.elements:
         if element.visible:
-            draw_element(painter, element, element.id == selected_id)
+            draw_element(painter, element, element.id in selected_ids)
     painter.restore()
+
+
+def screen_preview_image(screen: ScreenDesign, size: QSize) -> QImage:
+    """Render a screen into a compact opaque thumbnail image."""
+    image = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor("#20242a"))
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    painter.setPen(QPen(QColor("#59636f"), 1))
+    painter.drawRect(QRectF(image.rect()).adjusted(0, 0, -1, -1))
+    draw_screen(painter, screen, QRectF(image.rect()).adjusted(4, 4, -4, -4))
+    painter.end()
+    return image
 
 
 def draw_element(
@@ -219,6 +337,14 @@ def draw_element(
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
             "CODE",
         )
+    elif element.editor_locked:
+        painter.setPen(QPen(QColor("#9aa3ad"), 1, Qt.PenStyle.DashLine))
+        painter.drawRect(rectangle.adjusted(1, 1, -1, -1))
+        painter.drawText(
+            rectangle.adjusted(3, 2, -3, -2),
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
+            "LOCK",
+        )
 
 
 class ElementPaletteButton(QPushButton):
@@ -260,20 +386,33 @@ class DesignCanvas(QWidget):
     """Provide direct selection, dragging, and resizing of GUI elements."""
 
     element_selected = Signal(str)
+    selection_changed = Signal(object)
     geometry_changed = Signal()
     zoom_changed = Signal(int)
     element_dropped = Signal(str, int, int)
+    delete_requested = Signal()
+    duplicate_requested = Signal()
 
     def __init__(self, session: DesignerSession, parent: QWidget | None = None):
         """Initialize the screen design canvas."""
         super().__init__(parent)
         self.session = session
         self.selected_id: str | None = None
+        self.selected_ids: set[str] = set()
         self.zoom_percent = 180
         self.reference: QImage | None = None
         self.reference_opacity = 45
+        self.grid_visible = False
+        self.snap_enabled = False
+        self.grid_size = 8
+        self.show_focus_order = False
         self._drag_mode = ""
         self._drag_offset = QPointF()
+        self._drag_start_point = QPointF()
+        self._drag_originals: dict[str, tuple[int, int]] = {}
+        self._marquee_start = QPointF()
+        self._marquee_end = QPointF()
+        self._marquee_base: set[str] = set()
         self._drop_kind = ""
         self._drop_point = QPointF()
         self.setAcceptDrops(True)
@@ -284,6 +423,22 @@ class DesignCanvas(QWidget):
     def set_selected(self, element_id: str | None) -> None:
         """Select one element for drawing and manipulation."""
         self.selected_id = element_id
+        self.selected_ids = {element_id} if element_id else set()
+        self.update()
+
+    def set_selection(
+        self, element_ids: set[str], primary_id: str | None = None
+    ) -> None:
+        """Set a multi-element canvas selection and its primary element."""
+        valid = {
+            element.id
+            for element in self.session.current_screen().elements
+            if element.id in element_ids
+        }
+        self.selected_ids = valid
+        self.selected_id = (
+            primary_id if primary_id in valid else next(iter(valid), None)
+        )
         self.update()
 
     def set_zoom(self, percent: int) -> None:
@@ -306,6 +461,25 @@ class DesignCanvas(QWidget):
         self.reference_opacity = max(0, min(100, percent))
         self.update()
 
+    def set_grid_visible(self, visible: bool) -> None:
+        """Show or hide the GUI alignment grid."""
+        self.grid_visible = visible
+        self.update()
+
+    def set_snap_enabled(self, enabled: bool) -> None:
+        """Enable or disable geometry snapping to the GUI grid."""
+        self.snap_enabled = enabled
+
+    def set_grid_size(self, size: int) -> None:
+        """Set the GUI grid spacing in device pixels."""
+        self.grid_size = max(2, min(64, size))
+        self.update()
+
+    def set_focus_order_visible(self, visible: bool) -> None:
+        """Show or hide keyboard focus order badges."""
+        self.show_focus_order = visible
+        self.update()
+
     def sizeHint(self) -> QSize:
         """Return the zoomed active-screen size."""
         screen = self.session.current_screen()
@@ -320,10 +494,46 @@ class DesignCanvas(QWidget):
             painter,
             self.session.current_screen(),
             QRectF(0, 0, self.width(), self.height()),
-            self.selected_id,
+            self.selected_ids,
             self.reference,
             self.reference_opacity / 100,
         )
+        if self.grid_visible:
+            factor = self.zoom_percent / 100
+            spacing = self.grid_size * factor
+            if spacing >= 4:
+                painter.setPen(QPen(QColor(255, 255, 255, 35), 1))
+                x = spacing
+                while x < self.width():
+                    painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
+                    x += spacing
+                y = spacing
+                while y < self.height():
+                    painter.drawLine(QPointF(0, y), QPointF(self.width(), y))
+                    y += spacing
+        if self.show_focus_order:
+            factor = self.zoom_percent / 100
+            painter.setPen(QPen(QColor("#ffffff"), 1))
+            painter.setBrush(QColor("#1565c0"))
+            for element in self.session.current_screen().elements:
+                if not element.visible or not element.focusable:
+                    continue
+                center = QPointF(
+                    (element.x + 7) * factor,
+                    (element.y + 7) * factor,
+                )
+                radius = max(7.0, min(13.0, 8.0 * factor))
+                painter.drawEllipse(center, radius, radius)
+                painter.drawText(
+                    QRectF(
+                        center.x() - radius,
+                        center.y() - radius,
+                        radius * 2,
+                        radius * 2,
+                    ),
+                    Qt.AlignmentFlag.AlignCenter,
+                    str(element.focus_order),
+                )
         if self._drop_kind:
             factor = self.zoom_percent / 100
             point = QPointF(
@@ -336,6 +546,17 @@ class DesignCanvas(QWidget):
             painter.drawText(
                 guide, Qt.AlignmentFlag.AlignCenter, self._drop_kind.title()
             )
+        if self._drag_mode == "marquee":
+            factor = self.zoom_percent / 100
+            marquee = QRectF(
+                self._marquee_start.x() * factor,
+                self._marquee_start.y() * factor,
+                (self._marquee_end.x() - self._marquee_start.x()) * factor,
+                (self._marquee_end.y() - self._marquee_start.y()) * factor,
+            ).normalized()
+            painter.setBrush(QColor(0, 170, 255, 35))
+            painter.setPen(QPen(QColor("#00aaff"), 1, Qt.PenStyle.DashLine))
+            painter.drawRect(marquee)
         painter.end()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
@@ -379,13 +600,34 @@ class DesignCanvas(QWidget):
         point = self._design_point(event.position())
         element = self._element_at(point)
         if element is None:
-            self.selected_id = None
-            self.element_selected.emit("")
+            self._drag_mode = "marquee"
+            self._marquee_start = point
+            self._marquee_end = point
+            self._marquee_base = (
+                set(self.selected_ids)
+                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+                else set()
+            )
+            if not self._marquee_base:
+                self.selected_id = None
+                self.selected_ids.clear()
+                self._emit_selection()
             self.update()
             return
+        shifted = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if shifted:
+            if element.id in self.selected_ids:
+                self.selected_ids.remove(element.id)
+                self.selected_id = next(iter(self.selected_ids), None)
+                self._emit_selection()
+                self.update()
+                return
+            self.selected_ids.add(element.id)
+        elif element.id not in self.selected_ids:
+            self.selected_ids = {element.id}
         self.selected_id = element.id
-        self.element_selected.emit(element.id)
-        if element.locked:
+        self._emit_selection()
+        if element.locked or element.editor_locked:
             self._drag_mode = ""
             self.update()
             return
@@ -398,42 +640,60 @@ class DesignCanvas(QWidget):
         source_call = str(element.source_values.get("call_type", ""))
         can_resize = not (element.source_path and source_call == "text")
         self._drag_mode = (
-            "resize" if can_resize and resize_area.contains(point) else "move"
+            "resize"
+            if len(self.selected_ids) == 1
+            and can_resize
+            and resize_area.contains(point)
+            else "move"
         )
         self._drag_offset = QPointF(point.x() - element.x, point.y() - element.y)
+        self._drag_start_point = point
+        self._drag_originals = {
+            item.id: (item.x, item.y)
+            for item in self._selected_elements()
+            if not item.locked and not item.editor_locked
+        }
+        self.session.begin_transaction()
         self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         """Move or resize the selected element."""
         if not self._drag_mode or not (event.buttons() & Qt.MouseButton.LeftButton):
             return
+        point = self._design_point(event.position())
+        if self._drag_mode == "marquee":
+            self._marquee_end = point
+            self.update()
+            return
         element = self._selected_element()
         if element is None:
             return
-        point = self._design_point(event.position())
         screen = self.session.current_screen()
         if self._drag_mode == "move":
-            element.x = max(
-                0,
-                min(
-                    screen.width - element.width,
-                    round(point.x() - self._drag_offset.x()),
-                ),
-            )
-            element.y = max(
-                0,
-                min(
-                    screen.height - element.height,
-                    round(point.y() - self._drag_offset.y()),
-                ),
-            )
+            delta_x = round(point.x() - self._drag_start_point.x())
+            delta_y = round(point.y() - self._drag_start_point.y())
+            primary_origin = self._drag_originals.get(self.selected_id or "")
+            if self.snap_enabled and primary_origin is not None:
+                delta_x = (
+                    self.snap_value(primary_origin[0] + delta_x) - primary_origin[0]
+                )
+                delta_y = (
+                    self.snap_value(primary_origin[1] + delta_y) - primary_origin[1]
+                )
+            for item in self._selected_elements():
+                origin = self._drag_originals.get(item.id)
+                if origin is None:
+                    continue
+                item.x = max(0, min(screen.width - item.width, origin[0] + delta_x))
+                item.y = max(0, min(screen.height - item.height, origin[1] + delta_y))
         else:
-            element.width = max(
-                1, min(screen.width - element.x, round(point.x() - element.x))
-            )
-            element.height = max(
-                1, min(screen.height - element.y, round(point.y() - element.y))
-            )
+            width = round(point.x() - element.x)
+            height = round(point.y() - element.y)
+            if self.snap_enabled:
+                width = self.snap_value(element.x + width) - element.x
+                height = self.snap_value(element.y + height) - element.y
+            element.width = max(1, min(screen.width - element.x, width))
+            element.height = max(1, min(screen.height - element.y, height))
         self.session.mark_changed(False)
         self.geometry_changed.emit()
         self.update()
@@ -441,7 +701,56 @@ class DesignCanvas(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         """Finish the current geometry change."""
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._drag_mode == "marquee":
+                area = QRectF(self._marquee_start, self._marquee_end).normalized()
+                selected = set(self._marquee_base)
+                selected.update(
+                    element.id
+                    for element in self.session.current_screen().elements
+                    if element.visible
+                    and area.intersects(
+                        QRectF(element.x, element.y, element.width, element.height)
+                    )
+                )
+                self.selected_ids = selected
+                self.selected_id = next(iter(selected), None)
+                self._emit_selection()
+            if self._drag_mode:
+                if self._drag_mode != "marquee":
+                    self.session.end_transaction()
             self._drag_mode = ""
+            self._drag_originals.clear()
+            self.update()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Apply common keyboard operations to selected elements."""
+        if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
+            self.delete_requested.emit()
+            event.accept()
+            return
+        if event.matches(QKeySequence.StandardKey.Copy):
+            event.ignore()
+            return
+        if (
+            event.key() == Qt.Key.Key_D
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            self.duplicate_requested.emit()
+            event.accept()
+            return
+        directions = {
+            Qt.Key.Key_Left: (-1, 0),
+            Qt.Key.Key_Right: (1, 0),
+            Qt.Key.Key_Up: (0, -1),
+            Qt.Key.Key_Down: (0, 1),
+        }
+        direction = directions.get(event.key())
+        if direction is None or not self.selected_ids:
+            super().keyPressEvent(event)
+            return
+        step = 10 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1
+        self._nudge_selection(direction[0] * step, direction[1] * step)
+        event.accept()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         """Zoom the GUI canvas with the mouse wheel."""
@@ -456,6 +765,12 @@ class DesignCanvas(QWidget):
         """Convert widget coordinates to screen coordinates."""
         factor = self.zoom_percent / 100
         return QPointF(point.x() / factor, point.y() / factor)
+
+    def snap_value(self, value: int) -> int:
+        """Snap one device coordinate when grid snapping is enabled."""
+        if not self.snap_enabled:
+            return value
+        return round(value / self.grid_size) * self.grid_size
 
     def _element_at(self, point: QPointF) -> GuiElement | None:
         """Return the topmost element below one point."""
@@ -477,6 +792,36 @@ class DesignCanvas(QWidget):
             ),
             None,
         )
+
+    def _selected_elements(self) -> list[GuiElement]:
+        """Return selected elements in screen drawing order."""
+        return [
+            element
+            for element in self.session.current_screen().elements
+            if element.id in self.selected_ids
+        ]
+
+    def _emit_selection(self) -> None:
+        """Notify inspector views about the complete canvas selection."""
+        self.element_selected.emit(self.selected_id or "")
+        self.selection_changed.emit(set(self.selected_ids))
+
+    def _nudge_selection(self, delta_x: int, delta_y: int) -> None:
+        """Move unlocked selected elements by a keyboard delta."""
+        screen = self.session.current_screen()
+        changed = False
+        for element in self._selected_elements():
+            if element.locked or element.editor_locked:
+                continue
+            x = max(0, min(screen.width - element.width, element.x + delta_x))
+            y = max(0, min(screen.height - element.height, element.y + delta_y))
+            if (x, y) != (element.x, element.y):
+                element.x, element.y = x, y
+                changed = True
+        if changed:
+            self.session.mark_changed(False)
+            self.geometry_changed.emit()
+            self.update()
 
     def _drag_kind(self, mime: QMimeData) -> str | None:
         """Return a valid GUI element kind from drag data."""
@@ -504,6 +849,7 @@ class ScreenDesignerWidget(QWidget):
         super().__init__(parent)
         self.session = session
         self.selected_element_id: str | None = None
+        self.selected_element_ids: set[str] = set()
         self._updating = False
         self._build_interface()
         self._connect_signals()
@@ -545,6 +891,11 @@ class ScreenDesignerWidget(QWidget):
         left_layout = QVBoxLayout(left)
         left_layout.addWidget(QLabel("Screens"))
         self.screen_list = QListWidget()
+        self.screen_list.setIconSize(QSize(76, 64))
+        self.screen_list.setSpacing(2)
+        self.screen_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.screen_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.screen_list.setToolTip("Drag screens to reorder them.")
         left_layout.addWidget(self.screen_list, 1)
         screen_buttons = QGridLayout()
         self.add_screen_button = QPushButton("Add")
@@ -579,6 +930,33 @@ class ScreenDesignerWidget(QWidget):
             tools.addWidget(button)
         tools.addStretch(1)
         center_layout.addLayout(tools)
+        layout_tools = QHBoxLayout()
+        self.grid_visible_check = QCheckBox("Grid")
+        self.snap_check = QCheckBox("Snap")
+        self.focus_order_visible_check = QCheckBox("Focus order")
+        self.grid_size_spin = QSpinBox()
+        self.grid_size_spin.setRange(2, 64)
+        self.grid_size_spin.setValue(8)
+        self.grid_size_spin.setSuffix(" px")
+        layout_tools.addWidget(self.grid_visible_check)
+        layout_tools.addWidget(self.snap_check)
+        layout_tools.addWidget(self.focus_order_visible_check)
+        layout_tools.addWidget(self.grid_size_spin)
+        self.alignment_buttons: dict[str, QPushButton] = {}
+        for key, label in (
+            ("left", "Left"),
+            ("hcenter", "Center X"),
+            ("top", "Top"),
+            ("vcenter", "Center Y"),
+            ("distribute_h", "Space X"),
+            ("distribute_v", "Space Y"),
+        ):
+            button = QPushButton(label)
+            button.setToolTip(f"Align selected elements: {label}")
+            self.alignment_buttons[key] = button
+            layout_tools.addWidget(button)
+        layout_tools.addStretch(1)
+        center_layout.addLayout(layout_tools)
         self.canvas_scroll = QScrollArea()
         self.canvas_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.canvas = DesignCanvas(self.session)
@@ -590,9 +968,25 @@ class ScreenDesignerWidget(QWidget):
         right_layout = QVBoxLayout(right)
         right_layout.addWidget(QLabel("Element hierarchy"))
         self.element_list = QListWidget()
+        self.element_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.element_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.element_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.element_list.setToolTip(
+            "Shift-select multiple layers. Drag layers to change drawing order."
+        )
         right_layout.addWidget(self.element_list, 1)
         self.delete_element_button = QPushButton("Delete selected element")
         right_layout.addWidget(self.delete_element_button)
+        layer_actions = QGridLayout()
+        self.duplicate_element_button = QPushButton("Duplicate")
+        self.lock_element_button = QPushButton("Lock")
+        self.visibility_element_button = QPushButton("Hide")
+        layer_actions.addWidget(self.duplicate_element_button, 0, 0)
+        layer_actions.addWidget(self.lock_element_button, 0, 1)
+        layer_actions.addWidget(self.visibility_element_button, 1, 0, 1, 2)
+        right_layout.addLayout(layer_actions)
         self.source_notice_label = QLabel()
         self.source_notice_label.setWordWrap(True)
         self.source_notice_label.setStyleSheet("color: #ef6c00;")
@@ -619,6 +1013,9 @@ class ScreenDesignerWidget(QWidget):
         self.asset_call_edit = QLineEdit()
         self.asset_call_edit.setPlaceholderText("Optional icon function")
         self.visible_check = QCheckBox("Visible")
+        self.focusable_check = QCheckBox("Keyboard focusable")
+        self.focus_order_spin = QSpinBox()
+        self.focus_order_spin.setRange(0, 999)
         self.fill_color_button = QPushButton("Fill...")
         self.border_color_button = QPushButton("Border...")
         self.text_color_button = QPushButton("Text...")
@@ -631,6 +1028,8 @@ class ScreenDesignerWidget(QWidget):
         property_form.addRow("Text", self.element_text_edit)
         property_form.addRow("Asset call", self.asset_call_edit)
         property_form.addRow(self.visible_check)
+        property_form.addRow(self.focusable_check)
+        property_form.addRow("Focus order", self.focus_order_spin)
         property_form.addRow(self.fill_color_button)
         property_form.addRow(self.border_color_button)
         property_form.addRow(self.text_color_button)
@@ -645,16 +1044,35 @@ class ScreenDesignerWidget(QWidget):
         self.session.project_changed.connect(self.refresh)
         self.session.active_screen_changed.connect(self._active_screen_changed)
         self.screen_list.currentRowChanged.connect(self._screen_selected)
-        self.element_list.currentRowChanged.connect(self._element_row_selected)
-        self.canvas.element_selected.connect(self._canvas_element_selected)
+        self.screen_list.model().rowsMoved.connect(self._screens_reordered)
+        self.element_list.itemSelectionChanged.connect(
+            self._element_list_selection_changed
+        )
+        self.element_list.model().rowsMoved.connect(self._layers_reordered)
+        self.canvas.selection_changed.connect(self._canvas_selection_changed)
         self.canvas.geometry_changed.connect(self._canvas_geometry_changed)
         self.canvas.zoom_changed.connect(self.zoom_spin.setValue)
         self.canvas.element_dropped.connect(self._drop_element)
         self.zoom_spin.valueChanged.connect(self.canvas.set_zoom)
+        self.grid_visible_check.toggled.connect(self.canvas.set_grid_visible)
+        self.snap_check.toggled.connect(self.canvas.set_snap_enabled)
+        self.focus_order_visible_check.toggled.connect(
+            self.canvas.set_focus_order_visible
+        )
+        self.grid_size_spin.valueChanged.connect(self.canvas.set_grid_size)
+        for mode, button in self.alignment_buttons.items():
+            button.clicked.connect(
+                lambda checked=False, alignment=mode: self._align_selection(alignment)
+            )
         self.add_screen_button.clicked.connect(self._add_screen)
         self.duplicate_screen_button.clicked.connect(self._duplicate_screen)
         self.delete_screen_button.clicked.connect(self._delete_screen)
         self.delete_element_button.clicked.connect(self._delete_element)
+        self.duplicate_element_button.clicked.connect(self._duplicate_elements)
+        self.lock_element_button.clicked.connect(self._toggle_element_lock)
+        self.visibility_element_button.clicked.connect(self._toggle_element_visibility)
+        self.canvas.delete_requested.connect(self._delete_element)
+        self.canvas.duplicate_requested.connect(self._duplicate_elements)
         for kind, button in self.element_buttons.items():
             button.clicked.connect(
                 lambda checked=False, element_kind=kind: self._add_element(element_kind)
@@ -675,6 +1093,8 @@ class ScreenDesignerWidget(QWidget):
         for widget in (self.x_spin, self.y_spin, self.width_spin, self.height_spin):
             widget.valueChanged.connect(self._element_properties_changed)
         self.visible_check.toggled.connect(self._element_properties_changed)
+        self.focusable_check.toggled.connect(self._element_properties_changed)
+        self.focus_order_spin.valueChanged.connect(self._element_properties_changed)
         self.fill_color_button.clicked.connect(
             lambda: self._choose_element_color("fill_color")
         )
@@ -696,6 +1116,12 @@ class ScreenDesignerWidget(QWidget):
         """Refresh all controls from the current project."""
         self._updating = True
         project = self.session.project
+        valid_elements = {
+            element.id for element in self.session.current_screen().elements
+        }
+        self.selected_element_ids.intersection_update(valid_elements)
+        if self.selected_element_id not in self.selected_element_ids:
+            self.selected_element_id = next(iter(self.selected_element_ids), None)
         self.project_name_edit.setText(project.name)
         self.profile_combo.setCurrentText(project.profile)
         self.project_width_spin.setValue(project.width)
@@ -709,10 +1135,22 @@ class ScreenDesignerWidget(QWidget):
         self.screen_list.clear()
         selected_row = 0
         for index, screen in enumerate(project.screens):
-            item = QListWidgetItem(screen.name)
+            item = QListWidgetItem(
+                QIcon(QPixmap.fromImage(screen_preview_image(screen, QSize(76, 64)))),
+                screen.name,
+            )
+            item.setSizeHint(QSize(190, 70))
             item.setData(Qt.ItemDataRole.UserRole, screen.id)
+            incoming = sum(
+                connection.target_id == screen.id for connection in project.connections
+            )
+            outgoing = sum(
+                connection.source_id == screen.id for connection in project.connections
+            )
+            details = f"{incoming} incoming, {outgoing} outgoing"
             if screen.source_path:
-                item.setToolTip(f"{screen.source_path}:{screen.source_line}")
+                details += f"\n{screen.source_path}:{screen.source_line}"
+            item.setToolTip(details)
             self.screen_list.addItem(item)
             if screen.id == self.session.active_screen_id:
                 selected_row = index
@@ -737,12 +1175,31 @@ class ScreenDesignerWidget(QWidget):
         item = self.screen_list.item(row)
         if item is not None:
             self.selected_element_id = None
+            self.selected_element_ids.clear()
             self.session.set_active_screen(str(item.data(Qt.ItemDataRole.UserRole)))
 
     def _active_screen_changed(self, screen_id: str) -> None:
         """Refresh the designer for a shared screen selection."""
         self.selected_element_id = None
+        self.selected_element_ids.clear()
         self.refresh()
+
+    def _screens_reordered(self, *args: object) -> None:
+        """Apply screen-list drag order to the designer project."""
+        if self._updating:
+            return
+        by_id = {screen.id: screen for screen in self.session.project.screens}
+        ordered = [
+            by_id[str(self.screen_list.item(row).data(Qt.ItemDataRole.UserRole))]
+            for row in range(self.screen_list.count())
+            if str(self.screen_list.item(row).data(Qt.ItemDataRole.UserRole)) in by_id
+        ]
+        if [screen.id for screen in ordered] == [
+            screen.id for screen in self.session.project.screens
+        ]:
+            return
+        self.session.project.screens = ordered
+        self.session.mark_changed()
 
     def _add_screen(self) -> None:
         """Prompt for and add a new application screen."""
@@ -825,44 +1282,184 @@ class ScreenDesignerWidget(QWidget):
         element = GuiElement.create(kind, len(screen.elements) + 1)
         screen.elements.append(element)
         self.selected_element_id = element.id
+        self.selected_element_ids = {element.id}
         self.session.mark_changed()
 
     def _drop_element(self, kind: str, x: int, y: int) -> None:
         """Add one palette element centered at a canvas drop point."""
         screen = self.session.current_screen()
         element = GuiElement.create(kind, len(screen.elements) + 1)
-        element.x = max(0, min(screen.width - element.width, x - element.width // 2))
-        element.y = max(0, min(screen.height - element.height, y - element.height // 2))
+        element.x = max(
+            0,
+            min(
+                screen.width - element.width,
+                self.canvas.snap_value(x - element.width // 2),
+            ),
+        )
+        element.y = max(
+            0,
+            min(
+                screen.height - element.height,
+                self.canvas.snap_value(y - element.height // 2),
+            ),
+        )
         screen.elements.append(element)
         self.selected_element_id = element.id
+        self.selected_element_ids = {element.id}
         self.session.mark_changed()
 
     def _delete_element(self) -> None:
         """Delete the selected screen element."""
-        if self.selected_element_id is None:
+        if not self.selected_element_ids:
             return
         screen = self.session.current_screen()
-        selected = self._selected_element()
-        if selected is not None and selected.source_path:
+        selected = [
+            element
+            for element in screen.elements
+            if element.id in self.selected_element_ids
+        ]
+        if any(element.source_path for element in selected):
             QMessageBox.information(
                 self,
                 "Source element retained",
-                "Imported source calls cannot be deleted. Set Visible off for editable calls.",
+                "Imported source calls cannot be deleted. Remove them from the selection or set Visible off.",
             )
             return
         screen.elements = [
-            item for item in screen.elements if item.id != self.selected_element_id
+            item for item in screen.elements if item.id not in self.selected_element_ids
         ]
         self.selected_element_id = None
+        self.selected_element_ids.clear()
+        self.session.mark_changed()
+
+    def _duplicate_elements(self) -> None:
+        """Duplicate selected design elements with a small offset."""
+        screen = self.session.current_screen()
+        selected = [
+            element
+            for element in screen.elements
+            if element.id in self.selected_element_ids
+            and not element.source_path
+            and not element.locked
+        ]
+        if not selected:
+            return
+        duplicates: list[GuiElement] = []
+        next_focus_order = (
+            max(
+                (element.focus_order for element in screen.elements),
+                default=-1,
+            )
+            + 1
+        )
+        for source in selected:
+            duplicate = GuiElement.from_dict(asdict(source))
+            duplicate.id = new_identifier("element")
+            duplicate.name = f"{source.name}_copy"
+            duplicate.x = max(0, min(screen.width - duplicate.width, source.x + 8))
+            duplicate.y = max(0, min(screen.height - duplicate.height, source.y + 8))
+            duplicate.editor_locked = False
+            if duplicate.focusable:
+                duplicate.focus_order = next_focus_order
+                next_focus_order += 1
+            duplicates.append(duplicate)
+        screen.elements.extend(duplicates)
+        self.selected_element_ids = {element.id for element in duplicates}
+        self.selected_element_id = duplicates[-1].id
+        self.session.mark_changed()
+
+    def _toggle_element_lock(self) -> None:
+        """Toggle editor locking for selected design elements."""
+        elements = [
+            element
+            for element in self.session.current_screen().elements
+            if element.id in self.selected_element_ids and not element.locked
+        ]
+        if not elements:
+            return
+        locked = not all(element.editor_locked for element in elements)
+        for element in elements:
+            element.editor_locked = locked
+        self.session.mark_changed()
+
+    def _toggle_element_visibility(self) -> None:
+        """Toggle visibility for all selected elements."""
+        elements = [
+            element
+            for element in self.session.current_screen().elements
+            if element.id in self.selected_element_ids
+        ]
+        if not elements:
+            return
+        visible = not all(element.visible for element in elements)
+        for element in elements:
+            element.visible = visible
+        self.session.mark_changed()
+
+    def _align_selection(self, mode: str) -> None:
+        """Align or distribute the unlocked selected elements."""
+        elements = [
+            element
+            for element in self.session.current_screen().elements
+            if element.id in self.selected_element_ids
+            and not element.locked
+            and not element.editor_locked
+        ]
+        if len(elements) < 2:
+            return
+        left = min(element.x for element in elements)
+        right = max(element.x + element.width for element in elements)
+        top = min(element.y for element in elements)
+        bottom = max(element.y + element.height for element in elements)
+        if mode == "left":
+            for element in elements:
+                element.x = left
+        elif mode == "hcenter":
+            center = (left + right) / 2
+            for element in elements:
+                element.x = round(center - element.width / 2)
+        elif mode == "top":
+            for element in elements:
+                element.y = top
+        elif mode == "vcenter":
+            center = (top + bottom) / 2
+            for element in elements:
+                element.y = round(center - element.height / 2)
+        elif mode == "distribute_h" and len(elements) >= 3:
+            ordered = sorted(elements, key=lambda element: element.x)
+            width = sum(element.width for element in ordered)
+            gap = (right - left - width) / (len(ordered) - 1)
+            position = float(left)
+            for element in ordered:
+                element.x = round(position)
+                position += element.width + gap
+        elif mode == "distribute_v" and len(elements) >= 3:
+            ordered = sorted(elements, key=lambda element: element.y)
+            height = sum(element.height for element in ordered)
+            gap = (bottom - top - height) / (len(ordered) - 1)
+            position = float(top)
+            for element in ordered:
+                element.y = round(position)
+                position += element.height + gap
+        else:
+            return
         self.session.mark_changed()
 
     def _refresh_element_list(self) -> None:
         """Refresh the active screen hierarchy list."""
         self.element_list.clear()
-        selected_row = -1
-        for index, element in enumerate(self.session.current_screen().elements):
-            prefix = "[code] " if element.locked else ""
-            item = QListWidgetItem(f"{prefix}{element.kind}: {element.name}")
+        current_item: QListWidgetItem | None = None
+        for element in self.session.current_screen().elements:
+            if element.locked:
+                prefix = "[code] "
+            elif element.editor_locked:
+                prefix = "[lock] "
+            elif not element.visible:
+                prefix = "[hidden] "
+            else:
+                prefix = ""
+            focus = f" | focus {element.focus_order}" if element.focusable else ""
+            item = QListWidgetItem(f"{prefix}{element.kind}: {element.name}{focus}")
             item.setData(Qt.ItemDataRole.UserRole, element.id)
             if element.source_path:
                 state = (
@@ -870,34 +1467,86 @@ class ScreenDesignerWidget(QWidget):
                 )
                 item.setToolTip(f"{state}\n{element.source_path}:{element.source_line}")
             self.element_list.addItem(item)
+            item.setSelected(element.id in self.selected_element_ids)
             if element.id == self.selected_element_id:
-                selected_row = index
-        self.element_list.setCurrentRow(selected_row)
-        self.canvas.set_selected(self.selected_element_id)
+                current_item = item
+        if current_item is not None:
+            self.element_list.setCurrentItem(
+                current_item, QItemSelectionModel.SelectionFlag.NoUpdate
+            )
+        self.canvas.set_selection(
+            set(self.selected_element_ids), self.selected_element_id
+        )
 
-    def _element_row_selected(self, row: int) -> None:
-        """Select an element from the hierarchy."""
-        if self._updating or row < 0:
+    def _element_list_selection_changed(self) -> None:
+        """Synchronize the hierarchy multi-selection into the canvas."""
+        if self._updating:
             return
-        item = self.element_list.item(row)
-        self._select_element(str(item.data(Qt.ItemDataRole.UserRole)) if item else None)
+        selected = {
+            str(item.data(Qt.ItemDataRole.UserRole))
+            for item in self.element_list.selectedItems()
+        }
+        current = self.element_list.currentItem()
+        primary = (
+            str(current.data(Qt.ItemDataRole.UserRole))
+            if current is not None and current.isSelected()
+            else next(iter(selected), None)
+        )
+        self.selected_element_ids = selected
+        self.selected_element_id = primary
+        self.canvas.set_selection(selected, primary)
+        self._refresh_element_properties()
 
-    def _canvas_element_selected(self, element_id: str) -> None:
-        """Synchronize a canvas selection into the hierarchy."""
-        self._select_element(element_id or None)
+    def _canvas_selection_changed(self, values: object) -> None:
+        """Synchronize a canvas multi-selection into the hierarchy."""
+        if self._updating:
+            return
+        selected = set(values) if isinstance(values, set) else set()
+        self.selected_element_ids = selected
+        self.selected_element_id = self.canvas.selected_id
+        self._updating = True
+        for row in range(self.element_list.count()):
+            item = self.element_list.item(row)
+            item.setSelected(item.data(Qt.ItemDataRole.UserRole) in selected)
+            if item.data(Qt.ItemDataRole.UserRole) == self.selected_element_id:
+                self.element_list.setCurrentItem(
+                    item, QItemSelectionModel.SelectionFlag.NoUpdate
+                )
+        self._refresh_element_properties()
+        self._updating = False
+
+    def _layers_reordered(self, *args: object) -> None:
+        """Apply hierarchy drag order to the screen drawing order."""
+        if self._updating:
+            return
+        screen = self.session.current_screen()
+        by_id = {element.id: element for element in screen.elements}
+        ordered = [
+            by_id[str(self.element_list.item(row).data(Qt.ItemDataRole.UserRole))]
+            for row in range(self.element_list.count())
+            if str(self.element_list.item(row).data(Qt.ItemDataRole.UserRole)) in by_id
+        ]
+        if [element.id for element in ordered] == [
+            element.id for element in screen.elements
+        ]:
+            return
+        screen.elements = ordered
+        self.session.mark_changed()
 
     def _select_element(self, element_id: str | None) -> None:
         """Select one active-screen element."""
         self.selected_element_id = element_id
-        self.canvas.set_selected(element_id)
+        self.selected_element_ids = {element_id} if element_id else set()
+        self.canvas.set_selection(self.selected_element_ids, element_id)
         self._updating = True
         for row in range(self.element_list.count()):
             item = self.element_list.item(row)
-            if item.data(Qt.ItemDataRole.UserRole) == element_id:
-                self.element_list.setCurrentRow(row)
-                break
-        if element_id is None:
-            self.element_list.setCurrentRow(-1)
+            selected = item.data(Qt.ItemDataRole.UserRole) == element_id
+            item.setSelected(selected)
+            if selected:
+                self.element_list.setCurrentItem(
+                    item, QItemSelectionModel.SelectionFlag.NoUpdate
+                )
         self._refresh_element_properties()
         self._updating = False
 
@@ -929,12 +1578,51 @@ class ScreenDesignerWidget(QWidget):
     def _refresh_element_properties(self) -> None:
         """Refresh controls for the selected element."""
         element = self._selected_element()
-        self.property_group.setEnabled(element is not None and not element.locked)
-        self.delete_element_button.setEnabled(
-            element is not None and not bool(element.source_path)
+        selected = [
+            item
+            for item in self.session.current_screen().elements
+            if item.id in self.selected_element_ids
+        ]
+        single_editable = (
+            len(selected) == 1
+            and element is not None
+            and not element.locked
+            and not element.editor_locked
         )
+        self.property_group.setEnabled(single_editable)
+        self.delete_element_button.setEnabled(
+            bool(selected) and not any(item.source_path for item in selected)
+        )
+        self.duplicate_element_button.setEnabled(
+            any(not item.source_path and not item.locked for item in selected)
+        )
+        editable_locks = [item for item in selected if not item.locked]
+        self.lock_element_button.setEnabled(bool(editable_locks))
+        self.lock_element_button.setText(
+            "Unlock"
+            if editable_locks and all(item.editor_locked for item in editable_locks)
+            else "Lock"
+        )
+        self.visibility_element_button.setEnabled(bool(selected))
+        self.visibility_element_button.setText(
+            "Show"
+            if selected and not any(item.visible for item in selected)
+            else "Hide"
+        )
+        for mode, button in self.alignment_buttons.items():
+            minimum = 3 if mode.startswith("distribute") else 2
+            button.setEnabled(
+                sum(not item.locked and not item.editor_locked for item in selected)
+                >= minimum
+            )
         if element is None:
             self.source_notice_label.clear()
+            return
+        if len(selected) > 1:
+            locked_count = sum(item.locked or item.editor_locked for item in selected)
+            self.source_notice_label.setText(
+                f"{len(selected)} elements selected. {locked_count} locked."
+            )
             return
         if element.locked:
             self.source_notice_label.setText(
@@ -944,6 +1632,8 @@ class ScreenDesignerWidget(QWidget):
             self.source_notice_label.setText(
                 f"Editable source call. Changes create a narrow patch.\n{element.source_path}:{element.source_line}"
             )
+        elif element.editor_locked:
+            self.source_notice_label.setText("Editor-locked layer. Unlock it to edit.")
         else:
             self.source_notice_label.clear()
         self.element_name_edit.setText(element.name)
@@ -957,6 +1647,9 @@ class ScreenDesignerWidget(QWidget):
         self.asset_call_edit.setText(element.asset_call)
         self.asset_call_edit.setEnabled(not bool(element.source_path))
         self.visible_check.setChecked(element.visible)
+        self.focusable_check.setChecked(element.focusable)
+        self.focus_order_spin.setValue(element.focus_order)
+        self.focus_order_spin.setEnabled(element.focusable)
         self._update_color_buttons(element)
         source_call = str(element.source_values.get("call_type", ""))
         source_backed = bool(element.source_path)
@@ -1037,7 +1730,7 @@ class ScreenDesignerWidget(QWidget):
         if self._updating:
             return
         element = self._selected_element()
-        if element is None or element.locked:
+        if element is None or element.locked or element.editor_locked:
             return
         element.name = self.element_name_edit.text().strip() or element.name
         element.kind = str(self.kind_combo.currentData())
@@ -1048,6 +1741,8 @@ class ScreenDesignerWidget(QWidget):
         element.text = self.element_text_edit.text().replace("\\n", "\n")
         element.asset_call = self.asset_call_edit.text().strip()
         element.visible = self.visible_check.isChecked()
+        element.focusable = self.focusable_check.isChecked()
+        element.focus_order = self.focus_order_spin.value()
         self.session.mark_changed()
 
     def _choose_screen_background(self) -> None:
@@ -1065,7 +1760,7 @@ class ScreenDesignerWidget(QWidget):
     def _choose_element_color(self, field_name: str) -> None:
         """Choose one selected-element RGB565 color."""
         element = self._selected_element()
-        if element is None:
+        if element is None or element.locked or element.editor_locked:
             return
         chosen = QColorDialog.getColor(
             qcolor_from_rgb565(getattr(element, field_name)), self
@@ -1105,16 +1800,23 @@ class ScreenDesignerWidget(QWidget):
 class GuiPreview(QWidget):
     """Render the active simulator screen at display aspect ratio."""
 
+    event_requested = Signal(str)
+    focus_changed = Signal(str)
+
     def __init__(self, session: DesignerSession, parent: QWidget | None = None):
         """Initialize the GUI flow preview."""
         super().__init__(parent)
         self.session = session
         self.preview_screen_id = session.project.start_screen_id
+        self.focused_element_id: str | None = None
         self.setMinimumSize(260, 220)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def set_screen(self, screen_id: str) -> None:
         """Set the screen shown in the simulator preview."""
         self.preview_screen_id = screen_id
+        self.focused_element_id = None
+        self._move_focus(0)
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -1123,8 +1825,137 @@ class GuiPreview(QWidget):
         painter.fillRect(self.rect(), QColor("#202020"))
         screen = self.session.project.screen(self.preview_screen_id)
         if screen is not None:
-            draw_screen(painter, screen, QRectF(self.rect()).adjusted(10, 10, -10, -10))
+            draw_screen(
+                painter,
+                screen,
+                self._screen_target(screen),
+                self.focused_element_id,
+            )
         painter.end()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """Focus and activate a clicked interactive preview element."""
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        screen = self.session.project.screen(self.preview_screen_id)
+        if screen is None:
+            return
+        point = self._screen_point(screen, event.position())
+        element = next(
+            (
+                item
+                for item in reversed(screen.elements)
+                if item.visible
+                and item.focusable
+                and QRectF(item.x, item.y, item.width, item.height).contains(point)
+            ),
+            None,
+        )
+        if element is None:
+            return
+        self.focused_element_id = element.id
+        self.focus_changed.emit(element.name)
+        self.event_requested.emit(element.name)
+        self.update()
+        self.setFocus()
+        event.accept()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Navigate and activate focusable preview elements by keyboard."""
+        if event.key() in {
+            Qt.Key.Key_Tab,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Down,
+        }:
+            self._move_focus(1)
+            event.accept()
+            return
+        if event.key() in {Qt.Key.Key_Left, Qt.Key.Key_Up, Qt.Key.Key_Backtab}:
+            self._move_focus(-1)
+            event.accept()
+            return
+        if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space}:
+            element = self._focused_element()
+            if element is not None:
+                self.event_requested.emit(element.name)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def _focusable_elements(self) -> list[GuiElement]:
+        """Return visible interactive elements in keyboard focus order."""
+        screen = self.session.project.screen(self.preview_screen_id)
+        if screen is None:
+            return []
+        indexed = [
+            (index, element)
+            for index, element in enumerate(screen.elements)
+            if element.visible and element.focusable
+        ]
+        return [
+            element
+            for index, element in sorted(
+                indexed, key=lambda item: (item[1].focus_order, item[0])
+            )
+        ]
+
+    def _move_focus(self, offset: int) -> None:
+        """Move preview focus by one ordered element offset."""
+        elements = self._focusable_elements()
+        if not elements:
+            self.focused_element_id = None
+            self.focus_changed.emit("")
+            self.update()
+            return
+        current = next(
+            (
+                index
+                for index, element in enumerate(elements)
+                if element.id == self.focused_element_id
+            ),
+            -1,
+        )
+        index = 0 if current < 0 else (current + offset) % len(elements)
+        self.focused_element_id = elements[index].id
+        self.focus_changed.emit(elements[index].name)
+        self.update()
+
+    def _focused_element(self) -> GuiElement | None:
+        """Return the currently focused preview element."""
+        return next(
+            (
+                element
+                for element in self._focusable_elements()
+                if element.id == self.focused_element_id
+            ),
+            None,
+        )
+
+    def _screen_target(self, screen: ScreenDesign) -> QRectF:
+        """Return the fitted preview rectangle for one screen."""
+        available = QRectF(self.rect()).adjusted(10, 10, -10, -10)
+        scale = min(
+            available.width() / screen.width,
+            available.height() / screen.height,
+        )
+        width = screen.width * scale
+        height = screen.height * scale
+        return QRectF(
+            available.x() + (available.width() - width) / 2,
+            available.y() + (available.height() - height) / 2,
+            width,
+            height,
+        )
+
+    def _screen_point(self, screen: ScreenDesign, point: QPointF) -> QPointF:
+        """Map one preview point into device screen coordinates."""
+        target = self._screen_target(screen)
+        if not target.contains(point):
+            return QPointF(-1, -1)
+        return QPointF(
+            (point.x() - target.x()) * screen.width / target.width(),
+            (point.y() - target.y()) * screen.height / target.height(),
+        )
 
 
 class FlowCanvas(QWidget):
@@ -1133,9 +1964,11 @@ class FlowCanvas(QWidget):
     screen_selected = Signal(str)
     screen_activated = Signal(str)
     connection_requested = Signal(str, str)
+    connection_selected = Signal(str)
+    connection_delete_requested = Signal(str)
 
-    NODE_WIDTH = 160
-    NODE_HEIGHT = 70
+    NODE_WIDTH = 200
+    NODE_HEIGHT = 140
     PORT_RADIUS = 7
 
     def __init__(self, session: DesignerSession, parent: QWidget | None = None):
@@ -1143,6 +1976,7 @@ class FlowCanvas(QWidget):
         super().__init__(parent)
         self.session = session
         self.selected_screen_id: str | None = None
+        self.selected_connection_id: str | None = None
         self.zoom = 1.0
         self._drag_offset = QPointF()
         self._node_dragging = False
@@ -1150,6 +1984,7 @@ class FlowCanvas(QWidget):
         self._connection_point = QPointF()
         self._connection_target_id: str | None = None
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(1400, 900)
 
     def paintEvent(self, event) -> None:
@@ -1179,6 +2014,7 @@ class FlowCanvas(QWidget):
         output_screen = self._output_screen_at(point)
         if output_screen is not None:
             self.selected_screen_id = output_screen.id
+            self.selected_connection_id = None
             self._connection_source_id = output_screen.id
             self._connection_point = point
             self._connection_target_id = None
@@ -1189,17 +2025,27 @@ class FlowCanvas(QWidget):
             return
         screen = self._screen_at(point)
         if screen is None:
+            connection = self._connection_at(point)
             self.selected_screen_id = None
+            self.selected_connection_id = (
+                connection.id if connection is not None else None
+            )
             self._node_dragging = False
+            if connection is not None:
+                self.connection_selected.emit(connection.id)
             self.update()
+            self.setFocus()
             return
         self.selected_screen_id = screen.id
+        self.selected_connection_id = None
         self._node_dragging = True
+        self.session.begin_transaction()
         self._drag_offset = QPointF(
             point.x() - screen.node_x, point.y() - screen.node_y
         )
         self.screen_selected.emit(screen.id)
         self.update()
+        self.setFocus()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         """Move a node or preview a dragged connection."""
@@ -1230,11 +2076,14 @@ class FlowCanvas(QWidget):
             return
         source_id = self._connection_source_id
         target_id = self._connection_target_id
+        node_dragging = self._node_dragging
         self._connection_source_id = None
         self._connection_target_id = None
         self._connection_point = QPointF()
         self._node_dragging = False
         self.update()
+        if node_dragging:
+            self.session.end_transaction()
         if source_id and target_id:
             self.connection_requested.emit(source_id, target_id)
         event.accept()
@@ -1256,6 +2105,17 @@ class FlowCanvas(QWidget):
         self.update()
         event.accept()
 
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Delete the selected design relation from the graph."""
+        if (
+            event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}
+            and self.selected_connection_id
+        ):
+            self.connection_delete_requested.emit(self.selected_connection_id)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def _draw_node(self, painter: QPainter, screen: ScreenDesign) -> None:
         """Draw one screen node."""
         rectangle = QRectF(
@@ -1272,14 +2132,29 @@ class FlowCanvas(QWidget):
             )
         )
         painter.drawRoundedRect(rectangle, 8, 8)
+        preview = QRectF(
+            screen.node_x + 8,
+            screen.node_y + 28,
+            self.NODE_WIDTH - 16,
+            self.NODE_HEIGHT - 36,
+        )
+        draw_screen(painter, screen, preview)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor("#7f8b99"), 1))
+        painter.drawRect(preview)
         painter.setPen(QColor("white"))
         painter.drawText(
-            rectangle.adjusted(8, 8, -8, -8), Qt.AlignmentFlag.AlignCenter, screen.name
+            QRectF(screen.node_x + 28, screen.node_y + 3, self.NODE_WIDTH - 56, 22),
+            Qt.AlignmentFlag.AlignCenter,
+            screen.name,
         )
         if screen.source_path:
-            painter.drawText(QPointF(screen.node_x + 6, screen.node_y + 62), "SOURCE")
+            painter.drawText(
+                QPointF(screen.node_x + self.NODE_WIDTH - 50, screen.node_y + 17),
+                "SOURCE",
+            )
         if start:
-            painter.drawText(QPointF(screen.node_x + 6, screen.node_y + 14), "START")
+            painter.drawText(QPointF(screen.node_x + 7, screen.node_y + 17), "START")
         input_color = (
             QColor("#ebcb8b")
             if screen.id == self._connection_target_id
@@ -1306,8 +2181,15 @@ class FlowCanvas(QWidget):
         start = self._output_port(source)
         end = self._input_port(target)
         path, approach = self._connection_path(start, end)
-        edge_color = QColor("#ff9800") if connection.locked else QColor("#88c0d0")
-        painter.setPen(QPen(edge_color, 2))
+        selected = connection.id == self.selected_connection_id
+        edge_color = (
+            QColor("#00bfff")
+            if selected
+            else QColor("#ff9800")
+            if connection.locked
+            else QColor("#88c0d0")
+        )
+        painter.setPen(QPen(edge_color, 4 if selected else 2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(path)
         direction = end - approach
@@ -1350,6 +2232,26 @@ class FlowCanvas(QWidget):
         path = QPainterPath(start)
         path.cubicTo(first, second, end)
         return path, second
+
+    def _connection_at(self, point: QPointF) -> FlowConnection | None:
+        """Return the nearest graph edge below one point."""
+        nearest: tuple[float, FlowConnection] | None = None
+        for connection in self.session.project.connections:
+            source = self.session.project.screen(connection.source_id)
+            target = self.session.project.screen(connection.target_id)
+            if source is None or target is None:
+                continue
+            path, _ = self._connection_path(
+                self._output_port(source), self._input_port(target)
+            )
+            for index in range(41):
+                sample = path.pointAtPercent(index / 40)
+                distance = (
+                    (sample.x() - point.x()) ** 2 + (sample.y() - point.y()) ** 2
+                ) ** 0.5
+                if distance <= 9 and (nearest is None or distance < nearest[0]):
+                    nearest = (distance, connection)
+        return nearest[1] if nearest is not None else None
 
     def _screen_at(self, point: QPointF) -> ScreenDesign | None:
         """Return the topmost graph node at one point."""
@@ -1455,8 +2357,10 @@ class ScreenFlowWidget(QWidget):
         controls_layout.addLayout(relation_buttons)
         self.start_screen_button = QPushButton("Set selected as start")
         self.open_screen_button = QPushButton("Open selected screen")
+        self.auto_layout_button = QPushButton("Auto-layout graph")
         controls_layout.addWidget(self.start_screen_button)
         controls_layout.addWidget(self.open_screen_button)
+        controls_layout.addWidget(self.auto_layout_button)
         simulator_group = QGroupBox("Navigation simulator")
         simulator_layout = QVBoxLayout(simulator_group)
         self.simulator_label = QLabel()
@@ -1494,19 +2398,25 @@ class ScreenFlowWidget(QWidget):
         self.graph.screen_selected.connect(self._graph_screen_selected)
         self.graph.screen_activated.connect(self._open_screen)
         self.graph.connection_requested.connect(self._graph_connection_requested)
+        self.graph.connection_selected.connect(self._select_connection_id)
+        self.graph.connection_delete_requested.connect(self._delete_connection_id)
         self.add_relation_button.clicked.connect(self._add_relation)
         self.update_relation_button.clicked.connect(self._update_relation)
         self.delete_relation_button.clicked.connect(self._delete_relation)
         self.connection_list.currentRowChanged.connect(self._connection_selected)
         self.start_screen_button.clicked.connect(self._set_start_screen)
         self.open_screen_button.clicked.connect(self._open_selected_screen)
+        self.auto_layout_button.clicked.connect(self._auto_layout_nodes)
         self.send_event_button.clicked.connect(self._send_simulator_event)
         self.reset_simulator_button.clicked.connect(self._reset_simulator)
         self.simulator_event_edit.returnPressed.connect(self._send_simulator_event)
+        self.preview.event_requested.connect(self._preview_event_requested)
+        self.preview.focus_changed.connect(self._preview_focus_changed)
 
     def refresh(self) -> None:
         """Refresh graph controls from the shared project."""
         self._updating = True
+        selected_connection_id = self.graph.selected_connection_id
         selected_source = self.source_combo.currentData()
         selected_target = self.target_combo.currentData()
         self.source_combo.clear()
@@ -1537,9 +2447,17 @@ class ScreenFlowWidget(QWidget):
             self.connection_list.addItem(item)
         if self.session.project.screen(self.simulated_screen_id) is None:
             self.simulated_screen_id = self.session.project.start_screen_id
+        if not any(
+            connection.id == selected_connection_id
+            for connection in self.session.project.connections
+        ):
+            selected_connection_id = None
+            self.graph.selected_connection_id = None
         self._update_simulator()
         self.graph.update()
         self._updating = False
+        if selected_connection_id:
+            self._select_connection_id(selected_connection_id)
 
     def _restore_combo(self, combo: QComboBox, value: object) -> None:
         """Restore a combo selection by item data."""
@@ -1591,6 +2509,9 @@ class ScreenFlowWidget(QWidget):
 
     def _select_connection_id(self, connection_id: str) -> None:
         """Select a relation list item by project identifier."""
+        self.graph.selected_connection_id = connection_id
+        self.graph.selected_screen_id = None
+        self.graph.update()
         for row in range(self.connection_list.count()):
             item = self.connection_list.item(row)
             if item.data(Qt.ItemDataRole.UserRole) == connection_id:
@@ -1625,6 +2546,20 @@ class ScreenFlowWidget(QWidget):
         connection = self._selected_connection()
         if connection is None:
             return
+        self._delete_connection_id(connection.id)
+
+    def _delete_connection_id(self, connection_id: str) -> None:
+        """Delete one design relationship by graph identifier."""
+        connection = next(
+            (
+                item
+                for item in self.session.project.connections
+                if item.id == connection_id
+            ),
+            None,
+        )
+        if connection is None:
+            return
         if connection.source_path:
             QMessageBox.information(
                 self,
@@ -1637,6 +2572,7 @@ class ScreenFlowWidget(QWidget):
             for item in self.session.project.connections
             if item.id != connection.id
         ]
+        self.graph.selected_connection_id = None
         self.session.mark_changed()
 
     def _connection_selected(self, row: int) -> None:
@@ -1646,6 +2582,9 @@ class ScreenFlowWidget(QWidget):
         connection = self._selected_connection()
         if connection is None:
             return
+        self.graph.selected_connection_id = connection.id
+        self.graph.selected_screen_id = None
+        self.graph.update()
         self.update_relation_button.setEnabled(not connection.locked)
         self.delete_relation_button.setEnabled(not bool(connection.source_path))
         self._restore_combo(self.source_combo, connection.source_id)
@@ -1683,6 +2622,8 @@ class ScreenFlowWidget(QWidget):
 
     def _graph_screen_selected(self, screen_id: str) -> None:
         """Load a selected graph node as relation source."""
+        self.connection_list.clearSelection()
+        self.graph.selected_connection_id = None
         self._restore_combo(self.source_combo, screen_id)
 
     def _set_start_screen(self) -> None:
@@ -1703,11 +2644,53 @@ class ScreenFlowWidget(QWidget):
         self.session.set_active_screen(screen_id)
         self.open_screen_requested.emit(screen_id)
 
+    def _auto_layout_nodes(self) -> None:
+        """Arrange graph nodes by navigation depth from the start screen."""
+        project = self.session.project
+        if not project.screens:
+            return
+        levels = {project.start_screen_id: 0}
+        queue = [project.start_screen_id]
+        while queue:
+            source_id = queue.pop(0)
+            level = levels[source_id]
+            for connection in project.connections:
+                if connection.source_id != source_id:
+                    continue
+                if connection.target_id not in levels:
+                    levels[connection.target_id] = level + 1
+                    queue.append(connection.target_id)
+        fallback_level = max(levels.values(), default=-1) + 1
+        for screen in project.screens:
+            levels.setdefault(screen.id, fallback_level)
+        rows: dict[int, int] = {}
+        changed = False
+        for screen in project.screens:
+            level = levels[screen.id]
+            row = rows.get(level, 0)
+            rows[level] = row + 1
+            x = 60 + level * (self.graph.NODE_WIDTH + 100)
+            y = 60 + row * (self.graph.NODE_HEIGHT + 60)
+            if (screen.node_x, screen.node_y) != (x, y):
+                screen.node_x, screen.node_y = x, y
+                changed = True
+        if changed:
+            self.session.mark_changed()
+
     def _send_simulator_event(self) -> None:
         """Send one event through the navigation graph."""
         event = self.simulator_event_edit.text().strip()
         if not event:
             return
+        self._dispatch_simulator_event(event)
+
+    def _preview_event_requested(self, event: str) -> None:
+        """Dispatch an event from a clicked or activated preview element."""
+        self.simulator_event_edit.setText(event)
+        self._dispatch_simulator_event(event)
+
+    def _dispatch_simulator_event(self, event: str) -> None:
+        """Apply one named event to the navigation simulator."""
         connection = next(
             (
                 item
@@ -1727,6 +2710,13 @@ class ScreenFlowWidget(QWidget):
             result += f" | action: {connection.action}"
         self.simulator_result_label.setText(result)
         self._update_simulator()
+
+    def _preview_focus_changed(self, name: str) -> None:
+        """Show the current keyboard focus in the simulator label."""
+        screen = self.session.project.screen(self.simulated_screen_id)
+        screen_name = screen.name if screen is not None else "Missing screen"
+        suffix = f" | Focus: {name}" if name else ""
+        self.simulator_label.setText(f"Current screen: {screen_name}{suffix}")
 
     def _reset_simulator(self) -> None:
         """Reset navigation simulation to the start screen."""

@@ -340,6 +340,9 @@ class MainWindow(QMainWindow):
         self.animation_parameter: str | None = None
         self.animation_timer = QTimer(self)
         self.animation_timer.setInterval(250)
+        self.designer_recovery_timer = QTimer(self)
+        self.designer_recovery_timer.setSingleShot(True)
+        self.designer_recovery_timer.setInterval(800)
         self.animation_asset_key: tuple[Path, str] | None = None
         self.animation_images: dict[Any, QImage] = {}
         self.animation_drafts: dict[Any, PixelArt] = {}
@@ -356,6 +359,8 @@ class MainWindow(QMainWindow):
         self._connect_actions()
         self._set_color(self._current_color)
         self._set_background(self._background_color)
+        self._update_recovery_action()
+        self._update_history_actions()
 
     def open_path(self, path: str | Path) -> None:
         """Open a Python file or source folder."""
@@ -400,6 +405,7 @@ class MainWindow(QMainWindow):
         self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
         self.redo_action = QAction("Redo", self)
         self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        self.recover_gui_action = QAction("Recover Autosaved GUI Project...", self)
         self.open_reference_action = QAction("Open Reference Image...", self)
         self.clear_reference_action = QAction("Clear Reference Image", self)
         self.import_frames_action = QAction("Import Animation Frames...", self)
@@ -442,6 +448,7 @@ class MainWindow(QMainWindow):
                 self.open_gui_action,
                 self.save_gui_action,
                 self.save_gui_as_action,
+                self.recover_gui_action,
             )
         )
         gui_menu.addSeparator()
@@ -722,8 +729,8 @@ class MainWindow(QMainWindow):
         self.export_action.triggered.connect(self._export_png)
         self.apply_action.triggered.connect(self._apply_to_source)
         self.quit_action.triggered.connect(self.close)
-        self.undo_action.triggered.connect(self.canvas.undo)
-        self.redo_action.triggered.connect(self.canvas.redo)
+        self.undo_action.triggered.connect(self._undo_current)
+        self.redo_action.triggered.connect(self._redo_current)
         self.tool_group.triggered.connect(self._tool_changed)
         self.primary_button.clicked.connect(self._choose_primary_color)
         self.background_button.clicked.connect(self._choose_background_color)
@@ -783,13 +790,19 @@ class MainWindow(QMainWindow):
         self.open_gui_action.triggered.connect(self._open_gui_project)
         self.save_gui_action.triggered.connect(self._save_gui_project)
         self.save_gui_as_action.triggered.connect(self._save_gui_project_as)
+        self.recover_gui_action.triggered.connect(self._recover_gui_project)
         self.export_gui_action.triggered.connect(self._export_gui_python)
         self.import_existing_app_action.triggered.connect(self._import_existing_app)
         self.apply_imported_app_action.triggered.connect(self._apply_imported_app_edits)
         self.workspace_tabs.currentChanged.connect(self._workspace_changed)
         self.screen_flow.open_screen_requested.connect(self._open_designed_screen)
         self.designer_session.dirty_changed.connect(self._designer_dirty_changed)
+        self.designer_session.dirty_changed.connect(self._schedule_designer_recovery)
         self.designer_session.project_changed.connect(self._update_import_actions)
+        self.designer_session.project_changed.connect(self._schedule_designer_recovery)
+        self.designer_session.history_changed.connect(self._update_history_actions)
+        self.designer_session.history_changed.connect(self._schedule_designer_recovery)
+        self.designer_recovery_timer.timeout.connect(self._write_designer_recovery)
 
     def _open_file(self) -> None:
         """Prompt for one Python source file."""
@@ -1029,6 +1042,34 @@ class MainWindow(QMainWindow):
         self.tool_bar.setVisible(index == 0)
         labels = ("Pixel Art", "App GUI", "Screen Flow")
         self.statusBar().showMessage(f"Workspace: {labels[index]}")
+        self._update_history_actions()
+
+    def _undo_current(self) -> None:
+        """Undo in the currently visible editor workspace."""
+        if self.workspace_tabs.currentIndex() == 0:
+            self.canvas.undo()
+        else:
+            self.designer_session.undo()
+        self._update_history_actions()
+
+    def _redo_current(self) -> None:
+        """Redo in the currently visible editor workspace."""
+        if self.workspace_tabs.currentIndex() == 0:
+            self.canvas.redo()
+        else:
+            self.designer_session.redo()
+        self._update_history_actions()
+
+    def _update_history_actions(self, *args: object) -> None:
+        """Enable undo and redo for the active workspace history."""
+        if not hasattr(self, "workspace_tabs"):
+            return
+        if self.workspace_tabs.currentIndex() == 0:
+            self.undo_action.setEnabled(self.canvas.can_undo())
+            self.redo_action.setEnabled(self.canvas.can_redo())
+        else:
+            self.undo_action.setEnabled(self.designer_session.can_undo())
+            self.redo_action.setEnabled(self.designer_session.can_redo())
 
     def _open_designed_screen(self, screen_id: str) -> None:
         """Open a graph screen in the visual GUI designer."""
@@ -1115,8 +1156,66 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError, TypeError) as error:
             QMessageBox.critical(self, "Cannot save GUI project", str(error))
             return False
+        self._clear_designer_recovery()
         self.statusBar().showMessage(f"Saved GUI project: {path}")
         return True
+
+    def _designer_recovery_path(self) -> Path:
+        """Return the autosaved GUI recovery project path."""
+        return (
+            Path(
+                QStandardPaths.writableLocation(
+                    QStandardPaths.StandardLocation.AppDataLocation
+                )
+            )
+            / "recovery"
+            / "last-gui-session.picogui.json"
+        )
+
+    def _schedule_designer_recovery(self, *args: object) -> None:
+        """Debounce recovery writes for a dirty GUI project."""
+        if self.designer_session.dirty:
+            self.designer_recovery_timer.start()
+
+    def _write_designer_recovery(self) -> None:
+        """Write the current dirty GUI project as an atomic recovery file."""
+        if not self.designer_session.dirty:
+            return
+        try:
+            self.designer_session.project.save(self._designer_recovery_path())
+        except OSError as error:
+            self.statusBar().showMessage(f"GUI recovery failed: {error}")
+            return
+        self._update_recovery_action()
+
+    def _recover_gui_project(self) -> None:
+        """Open the most recent autosaved GUI designer project."""
+        path = self._designer_recovery_path()
+        try:
+            project = GuiProject.load(path)
+        except (OSError, ValueError, TypeError) as error:
+            QMessageBox.critical(self, "Cannot recover GUI project", str(error))
+            self._update_recovery_action()
+            return
+        if not self._confirm_designer_discard():
+            return
+        self.designer_session.set_project(project)
+        self.designer_session.mark_changed(False)
+        self.workspace_tabs.setCurrentIndex(1)
+        self.statusBar().showMessage(f"Recovered GUI project from {path}")
+
+    def _clear_designer_recovery(self) -> None:
+        """Remove the recovery project after a successful explicit save."""
+        self.designer_recovery_timer.stop()
+        try:
+            self._designer_recovery_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+        self._update_recovery_action()
+
+    def _update_recovery_action(self) -> None:
+        """Enable recovery only when an autosave is available."""
+        self.recover_gui_action.setEnabled(self._designer_recovery_path().is_file())
 
     def _import_existing_app(self) -> None:
         """Scan an existing Python app into source-backed GUI screens."""
@@ -1294,7 +1393,10 @@ class MainWindow(QMainWindow):
         )
         if answer == QMessageBox.StandardButton.Save:
             return self._save_gui_project()
-        return answer == QMessageBox.StandardButton.Discard
+        if answer == QMessageBox.StandardButton.Discard:
+            self._clear_designer_recovery()
+            return True
+        return False
 
     def _scan(self, path: Path, folder: bool) -> None:
         """Scan a selected source path and refresh the catalogue."""
@@ -1739,6 +1841,7 @@ class MainWindow(QMainWindow):
 
     def _canvas_changed(self) -> None:
         """Update dirty state and previews after painting."""
+        self._update_history_actions()
         if self._suppress_changes or self.current_trace is None:
             return
         try:
