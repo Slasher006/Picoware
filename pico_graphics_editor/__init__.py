@@ -1,3 +1,3 @@
-"""Code-aware pixel graphics editor for Python renderers."""
+"""Code-aware pixel graphics and application GUI designer."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

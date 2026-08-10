@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QStandardPaths, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGridLayout,
     QGroupBox,
+    QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -26,9 +28,11 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QSplitter,
     QStatusBar,
+    QTabWidget,
     QToolBar,
     QToolButton,
     QVBoxLayout,
@@ -37,7 +41,15 @@ from PySide6.QtWidgets import (
 )
 
 from .canvas import PixelCanvas, pixel_art_image, qcolor_from_rgb565
+from .designer import DesignerSession, ScreenDesignerWidget, ScreenFlowWidget
+from .designer_model import GuiProject, backup_project, build_designer_patch
 from .model import PixelArt, rgb_to_rgb565
+from .reference import (
+    image_to_pixel_art,
+    prepare_reference_image,
+    read_image_frames,
+    split_sprite_sheet,
+)
 from .source import (
     GraphicsAsset,
     SourceExporter,
@@ -45,6 +57,7 @@ from .source import (
     SourceScanner,
     TraceInterpreter,
     TraceResult,
+    build_new_graphic_patch,
 )
 
 
@@ -57,9 +70,12 @@ class DiffDialog(QDialog):
         self.setWindowTitle("Review Python changes")
         self.resize(960, 680)
         layout = QVBoxLayout(self)
-        summary = QLabel(
-            f"{patch.path}\n{patch.run_count} optimized pixel runs will be written."
+        detail = (
+            f"{patch.run_count} generated GUI elements will be written."
+            if patch.key == "gui-designer"
+            else f"{patch.run_count} optimized pixel runs will be written."
         )
+        summary = QLabel(f"{patch.path}\n{detail}")
         summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(summary)
         editor = QPlainTextEdit()
@@ -76,18 +92,113 @@ class DiffDialog(QDialog):
         layout.addWidget(buttons)
 
 
+class SpriteSheetDialog(QDialog):
+    """Collect regular sprite-sheet slicing dimensions."""
+
+    def __init__(
+        self,
+        image: QImage,
+        suggested_width: int,
+        suggested_height: int,
+        parent: QWidget | None = None,
+    ):
+        """Build sprite-sheet slicing controls."""
+        super().__init__(parent)
+        self.setWindowTitle("Import sprite sheet")
+        layout = QFormLayout(self)
+        summary = QLabel(f"Image size: {image.width()} x {image.height()}")
+        layout.addRow(summary)
+        self.width_spin = QSpinBox()
+        self.width_spin.setRange(1, max(1, image.width()))
+        self.width_spin.setValue(min(max(1, suggested_width), image.width()))
+        layout.addRow("Frame width", self.width_spin)
+        self.height_spin = QSpinBox()
+        self.height_spin.setRange(1, max(1, image.height()))
+        self.height_spin.setValue(min(max(1, suggested_height), image.height()))
+        layout.addRow("Frame height", self.height_spin)
+        self.margin_spin = QSpinBox()
+        self.margin_spin.setRange(0, max(image.width(), image.height()))
+        layout.addRow("Outer margin", self.margin_spin)
+        self.spacing_spin = QSpinBox()
+        self.spacing_spin.setRange(0, max(image.width(), image.height()))
+        layout.addRow("Frame spacing", self.spacing_spin)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def settings(self) -> tuple[int, int, int, int]:
+        """Return frame width, height, margin, and spacing."""
+        return (
+            self.width_spin.value(),
+            self.height_spin.value(),
+            self.margin_spin.value(),
+            self.spacing_spin.value(),
+        )
+
+
+class NewGraphicDialog(QDialog):
+    """Collect dimensions and naming for a new Python graphic."""
+
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        imported_frame_count: int,
+        parent: QWidget | None = None,
+    ):
+        """Build new graphic creation controls."""
+        super().__init__(parent)
+        self.setWindowTitle("Create new Python graphic")
+        layout = QFormLayout(self)
+        self.name_edit = QLineEdit("draw_new_graphic")
+        layout.addRow("Function name", self.name_edit)
+        self.width_spin = QSpinBox()
+        self.width_spin.setRange(1, 320)
+        self.width_spin.setValue(min(320, max(1, width)))
+        layout.addRow("Width", self.width_spin)
+        self.height_spin = QSpinBox()
+        self.height_spin.setRange(1, 320)
+        self.height_spin.setValue(min(320, max(1, height)))
+        layout.addRow("Height", self.height_spin)
+        self.use_frames_check = QCheckBox(
+            f"Create animation from {imported_frame_count} imported frames"
+        )
+        self.use_frames_check.setEnabled(imported_frame_count > 1)
+        self.use_frames_check.setChecked(imported_frame_count > 1)
+        layout.addRow(self.use_frames_check)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def settings(self) -> tuple[str, int, int, bool]:
+        """Return function name, dimensions, and animation choice."""
+        return (
+            self.name_edit.text().strip(),
+            self.width_spin.value(),
+            self.height_spin.value(),
+            self.use_frames_check.isChecked(),
+        )
+
+
 class MainWindow(QMainWindow):
     """Provide source discovery and mouse pixel editing."""
 
     def __init__(self):
         """Initialize editor state and user interface."""
         super().__init__()
-        self.setWindowTitle("Pico Graphics Editor")
+        self.setWindowTitle("Pico Graphics and GUI Designer")
         self.resize(1480, 900)
         self.scanner = SourceScanner()
         self.tracer = TraceInterpreter()
         self.thumbnail_tracer = TraceInterpreter(800, 300, 48)
         self.exporter = SourceExporter()
+        self.designer_session = DesignerSession(self)
         self.assets: list[GraphicsAsset] = []
         self.current_asset: GraphicsAsset | None = None
         self.current_trace: TraceResult | None = None
@@ -96,6 +207,9 @@ class MainWindow(QMainWindow):
         self.animation_parameter: str | None = None
         self.animation_timer = QTimer(self)
         self.animation_timer.setInterval(250)
+        self.animation_asset_key: tuple[Path, str] | None = None
+        self.animation_images: dict[Any, QImage] = {}
+        self.animation_drafts: dict[Any, PixelArt] = {}
         self._scan_path: Path | None = None
         self._scan_folder = False
         self._dirty = False
@@ -113,7 +227,10 @@ class MainWindow(QMainWindow):
     def open_path(self, path: str | Path) -> None:
         """Open a Python file or source folder."""
         source_path = Path(path).expanduser().resolve()
-        if source_path.is_dir():
+        if source_path.name.endswith(".picogui.json"):
+            self._load_gui_project(source_path)
+            self.workspace_tabs.setCurrentIndex(1)
+        elif source_path.is_dir():
             self._scan_folder = True
             self._scan_path = source_path
             self._scan(source_path, True)
@@ -128,7 +245,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Confirm before closing with unsaved painting."""
-        if self._confirm_discard():
+        if self._confirm_designer_discard() and self._confirm_discard():
             event.accept()
         else:
             event.ignore()
@@ -150,6 +267,16 @@ class MainWindow(QMainWindow):
         self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
         self.redo_action = QAction("Redo", self)
         self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        self.open_reference_action = QAction("Open Reference Image...", self)
+        self.clear_reference_action = QAction("Clear Reference Image", self)
+        self.import_frames_action = QAction("Import Animation Frames...", self)
+        self.new_graphic_action = QAction("Create New Python Graphic...", self)
+        self.new_gui_action = QAction("New GUI Project", self)
+        self.open_gui_action = QAction("Open GUI Project...", self)
+        self.save_gui_action = QAction("Save GUI Project", self)
+        self.save_gui_action.setShortcut(QKeySequence("Ctrl+Alt+S"))
+        self.save_gui_as_action = QAction("Save GUI Project As...", self)
+        self.export_gui_action = QAction("Export GUI to Python...", self)
 
     def _build_interface(self) -> None:
         """Build the catalogue, canvas, and inspector."""
@@ -163,6 +290,26 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.quit_action)
         edit_menu = self.menuBar().addMenu("Edit")
         edit_menu.addActions((self.undo_action, self.redo_action))
+        reference_menu = self.menuBar().addMenu("Reference")
+        reference_menu.addActions(
+            (
+                self.open_reference_action,
+                self.clear_reference_action,
+                self.import_frames_action,
+                self.new_graphic_action,
+            )
+        )
+        gui_menu = self.menuBar().addMenu("GUI Project")
+        gui_menu.addActions(
+            (
+                self.new_gui_action,
+                self.open_gui_action,
+                self.save_gui_action,
+                self.save_gui_as_action,
+            )
+        )
+        gui_menu.addSeparator()
+        gui_menu.addAction(self.export_gui_action)
 
         self.tool_bar = QToolBar("Pixel tools")
         self.tool_bar.setMovable(False)
@@ -215,7 +362,13 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._build_inspector())
         splitter.setSizes((300, 820, 360))
         splitter.setStretchFactor(1, 1)
-        self.setCentralWidget(splitter)
+        self.workspace_tabs = QTabWidget()
+        self.workspace_tabs.addTab(splitter, "Pixel Art")
+        self.screen_designer = ScreenDesignerWidget(self.designer_session)
+        self.workspace_tabs.addTab(self.screen_designer, "App GUI")
+        self.screen_flow = ScreenFlowWidget(self.designer_session)
+        self.workspace_tabs.addTab(self.screen_flow, "Screen Flow")
+        self.setCentralWidget(self.workspace_tabs)
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Open a Python file or folder to begin.")
 
@@ -262,6 +415,9 @@ class MainWindow(QMainWindow):
 
     def _build_inspector(self) -> QWidget:
         """Build variants, palette, preview, and warnings."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -296,8 +452,86 @@ class MainWindow(QMainWindow):
         playback_layout.addWidget(self.play_button, 0, 0)
         playback_layout.addWidget(self.onion_skin_check, 0, 1)
         animation_layout.addLayout(playback_layout)
+        frame_edit_layout = QGridLayout()
+        self.add_frame_button = QPushButton("Add frame")
+        self.duplicate_frame_button = QPushButton("Duplicate")
+        self.delete_frame_button = QPushButton("Delete")
+        self.move_frame_left_button = QPushButton("Move left")
+        self.move_frame_right_button = QPushButton("Move right")
+        frame_edit_layout.addWidget(self.add_frame_button, 0, 0)
+        frame_edit_layout.addWidget(self.duplicate_frame_button, 0, 1)
+        frame_edit_layout.addWidget(self.delete_frame_button, 0, 2)
+        frame_edit_layout.addWidget(self.move_frame_left_button, 1, 0)
+        frame_edit_layout.addWidget(self.move_frame_right_button, 1, 1)
+        self.frame_interval_spin = QSpinBox()
+        self.frame_interval_spin.setRange(40, 5000)
+        self.frame_interval_spin.setValue(250)
+        self.frame_interval_spin.setSuffix(" ms")
+        frame_edit_layout.addWidget(self.frame_interval_spin, 1, 2)
+        animation_layout.addLayout(frame_edit_layout)
         self.animation_group.setVisible(False)
         layout.addWidget(self.animation_group)
+
+        reference_group = QGroupBox("Reference image")
+        reference_layout = QVBoxLayout(reference_group)
+        reference_buttons = QHBoxLayout()
+        self.open_reference_button = QPushButton("Open image...")
+        self.clear_reference_button = QPushButton("Clear")
+        reference_buttons.addWidget(self.open_reference_button)
+        reference_buttons.addWidget(self.clear_reference_button)
+        reference_layout.addLayout(reference_buttons)
+        self.reference_status_label = QLabel("No reference loaded")
+        self.reference_status_label.setWordWrap(True)
+        reference_layout.addWidget(self.reference_status_label)
+        reference_form = QFormLayout()
+        self.reference_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.reference_opacity_slider.setRange(0, 100)
+        self.reference_opacity_slider.setValue(55)
+        reference_form.addRow("Opacity", self.reference_opacity_slider)
+        self.reference_fit_combo = QComboBox()
+        self.reference_fit_combo.addItem("Contain", "contain")
+        self.reference_fit_combo.addItem("Cover", "cover")
+        self.reference_fit_combo.addItem("Stretch", "stretch")
+        reference_form.addRow("Fit", self.reference_fit_combo)
+        self.reference_rotation_combo = QComboBox()
+        for rotation in (0, 90, 180, 270):
+            self.reference_rotation_combo.addItem(f"{rotation} degrees", rotation)
+        reference_form.addRow("Rotation", self.reference_rotation_combo)
+        self.reference_scale_spin = QSpinBox()
+        self.reference_scale_spin.setRange(10, 500)
+        self.reference_scale_spin.setValue(100)
+        self.reference_scale_spin.setSuffix("%")
+        reference_form.addRow("Scale", self.reference_scale_spin)
+        self.reference_x_spin = QSpinBox()
+        self.reference_x_spin.setRange(-1024, 1024)
+        reference_form.addRow("X offset", self.reference_x_spin)
+        self.reference_y_spin = QSpinBox()
+        self.reference_y_spin.setRange(-1024, 1024)
+        reference_form.addRow("Y offset", self.reference_y_spin)
+        reference_layout.addLayout(reference_form)
+        reference_flags = QGridLayout()
+        self.reference_flip_horizontal = QCheckBox("Flip horizontally")
+        self.reference_flip_vertical = QCheckBox("Flip vertically")
+        self.reference_foreground_check = QCheckBox("Overlay above pixels")
+        reference_flags.addWidget(self.reference_flip_horizontal, 0, 0)
+        reference_flags.addWidget(self.reference_flip_vertical, 0, 1)
+        reference_flags.addWidget(self.reference_foreground_check, 1, 0, 1, 2)
+        reference_layout.addLayout(reference_flags)
+        conversion_form = QFormLayout()
+        self.reference_colors_spin = QSpinBox()
+        self.reference_colors_spin.setRange(2, 256)
+        self.reference_colors_spin.setValue(16)
+        conversion_form.addRow("Palette colors", self.reference_colors_spin)
+        self.reference_dither_check = QCheckBox("Floyd-Steinberg dithering")
+        conversion_form.addRow("Conversion", self.reference_dither_check)
+        reference_layout.addLayout(conversion_form)
+        self.convert_reference_button = QPushButton("Convert to editable pixels")
+        self.import_frames_button = QPushButton("Import GIF or sprite sheet...")
+        self.new_graphic_button = QPushButton("Create new Python graphic...")
+        reference_layout.addWidget(self.convert_reference_button)
+        reference_layout.addWidget(self.import_frames_button)
+        reference_layout.addWidget(self.new_graphic_button)
+        layout.addWidget(reference_group)
 
         palette_group = QGroupBox("RGB565 palette")
         palette_layout = QVBoxLayout(palette_group)
@@ -337,7 +571,8 @@ class MainWindow(QMainWindow):
         self.export_button.setEnabled(False)
         layout.addWidget(self.export_button)
         layout.addStretch(1)
-        return panel
+        scroll.setWidget(panel)
+        return scroll
 
     def _connect_actions(self) -> None:
         """Connect actions and widget signals."""
@@ -368,6 +603,50 @@ class MainWindow(QMainWindow):
         self.play_button.toggled.connect(self._toggle_animation)
         self.onion_skin_check.toggled.connect(self._update_onion_skin)
         self.animation_timer.timeout.connect(self._advance_animation)
+        self.add_frame_button.clicked.connect(self._add_animation_frame)
+        self.duplicate_frame_button.clicked.connect(self._duplicate_animation_frame)
+        self.delete_frame_button.clicked.connect(self._delete_animation_frame)
+        self.move_frame_left_button.clicked.connect(
+            lambda: self._move_animation_frame(-1)
+        )
+        self.move_frame_right_button.clicked.connect(
+            lambda: self._move_animation_frame(1)
+        )
+        self.frame_interval_spin.valueChanged.connect(self.animation_timer.setInterval)
+        self.open_reference_action.triggered.connect(self._open_reference_image)
+        self.clear_reference_action.triggered.connect(self._clear_reference_image)
+        self.import_frames_action.triggered.connect(self._import_animation_frames)
+        self.new_graphic_action.triggered.connect(self._create_new_graphic)
+        self.open_reference_button.clicked.connect(self._open_reference_image)
+        self.clear_reference_button.clicked.connect(self._clear_reference_image)
+        self.convert_reference_button.clicked.connect(self._convert_reference_image)
+        self.import_frames_button.clicked.connect(self._import_animation_frames)
+        self.new_graphic_button.clicked.connect(self._create_new_graphic)
+        self.reference_opacity_slider.valueChanged.connect(
+            self.canvas.set_reference_opacity
+        )
+        self.reference_foreground_check.toggled.connect(
+            self.canvas.set_reference_foreground
+        )
+        self.reference_fit_combo.currentIndexChanged.connect(
+            self._reference_options_changed
+        )
+        self.reference_rotation_combo.currentIndexChanged.connect(
+            self._reference_options_changed
+        )
+        self.reference_scale_spin.valueChanged.connect(self._reference_options_changed)
+        self.reference_x_spin.valueChanged.connect(self._reference_options_changed)
+        self.reference_y_spin.valueChanged.connect(self._reference_options_changed)
+        self.reference_flip_horizontal.toggled.connect(self._reference_options_changed)
+        self.reference_flip_vertical.toggled.connect(self._reference_options_changed)
+        self.new_gui_action.triggered.connect(self._new_gui_project)
+        self.open_gui_action.triggered.connect(self._open_gui_project)
+        self.save_gui_action.triggered.connect(self._save_gui_project)
+        self.save_gui_as_action.triggered.connect(self._save_gui_project_as)
+        self.export_gui_action.triggered.connect(self._export_gui_python)
+        self.workspace_tabs.currentChanged.connect(self._workspace_changed)
+        self.screen_flow.open_screen_requested.connect(self._open_designed_screen)
+        self.designer_session.dirty_changed.connect(self._designer_dirty_changed)
 
     def _open_file(self) -> None:
         """Prompt for one Python source file."""
@@ -402,8 +681,358 @@ class MainWindow(QMainWindow):
         if folder:
             self.open_path(folder)
 
+    def _open_reference_image(self) -> None:
+        """Open one image as a movable tracing reference."""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open reference image",
+            str(Path.cwd()),
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)",
+        )
+        if not filename:
+            return
+        frames = read_image_frames(filename)
+        if not frames:
+            QMessageBox.warning(
+                self, "Cannot open image", "The selected image could not be decoded."
+            )
+            return
+        image = frames[0]
+        self.canvas.set_reference_image(image)
+        self.reference_status_label.setText(
+            f"{Path(filename).name} - {image.width()} x {image.height()}"
+        )
+        self.statusBar().showMessage(f"Reference loaded: {filename}")
+
+    def _clear_reference_image(self) -> None:
+        """Remove the current tracing reference."""
+        self.canvas.set_reference_image(None)
+        self.reference_status_label.setText("No reference loaded")
+
+    def _reference_options_changed(self) -> None:
+        """Apply reference placement controls to the canvas."""
+        self.canvas.set_reference_options(
+            str(self.reference_fit_combo.currentData()),
+            int(self.reference_rotation_combo.currentData()),
+            self.reference_flip_horizontal.isChecked(),
+            self.reference_flip_vertical.isChecked(),
+            self.reference_scale_spin.value(),
+            self.reference_x_spin.value(),
+            self.reference_y_spin.value(),
+        )
+
+    def _convert_reference_image(self) -> None:
+        """Convert the positioned reference into editable RGB565 pixels."""
+        converted = self.canvas.reference_art(
+            self.reference_colors_spin.value(),
+            self.reference_dither_check.isChecked(),
+        )
+        if converted is None:
+            QMessageBox.information(
+                self, "No reference", "Open a reference image before converting it."
+            )
+            return
+        merged = self.canvas.art().copy()
+        for y in range(converted.height):
+            for x in range(converted.width):
+                color = converted.pixel(x, y)
+                if color is not None:
+                    merged.set_pixel(x, y, color)
+        self.canvas.apply_art(merged)
+        self.statusBar().showMessage("Reference converted to editable RGB565 pixels.")
+
+    def _import_animation_frames(self) -> None:
+        """Import animated-image or sprite-sheet frames for editing."""
+        if self.current_asset is None or self.animation_parameter is None:
+            QMessageBox.information(
+                self,
+                "Select an animation",
+                "Select a graphic with a frame, phase, or animation_time variant first.",
+            )
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import animation frames",
+            str(Path.cwd()),
+            "Images (*.gif *.webp *.png *.bmp *.jpg *.jpeg)",
+        )
+        if not filename:
+            return
+        frames = read_image_frames(filename)
+        if not frames:
+            QMessageBox.warning(
+                self, "Cannot open image", "The selected image could not be decoded."
+            )
+            return
+        if len(frames) == 1:
+            art = self.canvas.art()
+            dialog = SpriteSheetDialog(frames[0], art.width, art.height, self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            frames = split_sprite_sheet(frames[0], *dialog.settings())
+        if not frames:
+            QMessageBox.warning(
+                self, "No frames", "The sprite-sheet settings produced no frames."
+            )
+            return
+        self.animation_asset_key = self._asset_key(self.current_asset)
+        self.animation_images.clear()
+        self.animation_drafts.clear()
+        values = [
+            self.frame_combo.itemData(index)
+            for index in range(self.frame_combo.count())
+        ]
+        for index in range(len(frames)):
+            if index >= len(values):
+                values.append(index)
+                self.frame_combo.addItem(f"Frame {index}", index)
+        for value, frame in zip(values, frames):
+            self.animation_images[value] = frame.copy()
+        self._refresh_animation_labels()
+        self.frame_combo.setCurrentIndex(0)
+        self._render_current()
+        self.statusBar().showMessage(
+            f"Imported {len(frames)} frames from {Path(filename).name}."
+        )
+
+    def _create_new_graphic(self) -> None:
+        """Create a new Python graphic from reference pixels or frames."""
+        current = self.canvas.art()
+        dialog = NewGraphicDialog(
+            current.width,
+            current.height,
+            len(self.animation_images),
+            self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        function_name, width, height, use_frames = dialog.settings()
+        if not function_name:
+            QMessageBox.information(
+                self, "Function name required", "Enter a Python function name."
+            )
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Choose Python destination",
+            str(Path.cwd() / "graphics.py"),
+            "Python files (*.py)",
+        )
+        if not filename:
+            return
+        if not filename.endswith(".py"):
+            filename += ".py"
+        images: list[QImage]
+        if use_frames and self.animation_images:
+            images = list(self.animation_images.values())
+        else:
+            reference = self.canvas.reference_source_image()
+            images = [reference if reference is not None else pixel_art_image(current)]
+        frames: list[PixelArt] = []
+        for image in images:
+            prepared = prepare_reference_image(
+                image,
+                width,
+                height,
+                str(self.reference_fit_combo.currentData()),
+                int(self.reference_rotation_combo.currentData()),
+                self.reference_flip_horizontal.isChecked(),
+                self.reference_flip_vertical.isChecked(),
+                self.reference_scale_spin.value(),
+                self.reference_x_spin.value(),
+                self.reference_y_spin.value(),
+            )
+            frames.append(
+                image_to_pixel_art(
+                    prepared,
+                    width,
+                    height,
+                    self.reference_colors_spin.value(),
+                    self.reference_dither_check.isChecked(),
+                )
+            )
+        try:
+            patch = build_new_graphic_patch(filename, function_name, frames)
+        except (OSError, SyntaxError, ValueError) as error:
+            QMessageBox.critical(self, "Cannot create graphic", str(error))
+            return
+        review = DiffDialog(patch, self)
+        if review.exec() != QDialog.DialogCode.Accepted:
+            return
+        backup_root = (
+            Path(
+                QStandardPaths.writableLocation(
+                    QStandardPaths.StandardLocation.AppDataLocation
+                )
+            )
+            / "backups"
+        )
+        try:
+            backup = patch.apply(backup_root)
+        except (OSError, SyntaxError, ValueError) as error:
+            QMessageBox.critical(self, "Graphic creation failed", str(error))
+            return
+        detail = f"Backup: {backup}" if backup else "Created a new Python file."
+        QMessageBox.information(
+            self, "Graphic created", f"Updated {patch.path}.\n{detail}"
+        )
+        if self._scan_path == patch.path:
+            self._scan(patch.path, False)
+        elif self._scan_folder and self._scan_path in patch.path.parents:
+            self._scan(self._scan_path, True)
+
+    def _workspace_changed(self, index: int) -> None:
+        """Show tools relevant to the selected workspace."""
+        self.tool_bar.setVisible(index == 0)
+        labels = ("Pixel Art", "App GUI", "Screen Flow")
+        self.statusBar().showMessage(f"Workspace: {labels[index]}")
+
+    def _open_designed_screen(self, screen_id: str) -> None:
+        """Open a graph screen in the visual GUI designer."""
+        self.designer_session.set_active_screen(screen_id)
+        self.workspace_tabs.setCurrentIndex(1)
+
+    def _designer_dirty_changed(self, dirty: bool) -> None:
+        """Report designer project save state."""
+        if dirty:
+            self.statusBar().showMessage("GUI project has unsaved changes.")
+        else:
+            self.statusBar().showMessage("GUI project saved.")
+
+    def _new_gui_project(self) -> None:
+        """Create a new visual GUI project."""
+        if not self._confirm_designer_discard():
+            return
+        name, accepted = QInputDialog.getText(
+            self, "New GUI project", "Project name", text="Untitled GUI"
+        )
+        if not accepted or not name.strip():
+            return
+        self.designer_session.set_project(GuiProject.create(name.strip()))
+        self.workspace_tabs.setCurrentIndex(1)
+
+    def _open_gui_project(self) -> None:
+        """Open a persisted GUI designer project."""
+        if not self._confirm_designer_discard():
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open GUI project",
+            str(Path.cwd()),
+            "Pico GUI projects (*.picogui.json);;JSON files (*.json)",
+        )
+        if filename:
+            self._load_gui_project(Path(filename))
+
+    def _load_gui_project(self, path: Path) -> None:
+        """Load a GUI project path with error reporting."""
+        try:
+            project = GuiProject.load(path)
+        except (OSError, ValueError, TypeError) as error:
+            QMessageBox.critical(self, "Cannot open GUI project", str(error))
+            return
+        self.designer_session.set_project(project, path)
+        self.workspace_tabs.setCurrentIndex(1)
+        self.statusBar().showMessage(f"Opened GUI project: {path}")
+
+    def _save_gui_project(self) -> bool:
+        """Save the GUI project to its current path."""
+        if self.designer_session.path is None:
+            return self._save_gui_project_as()
+        return self._save_gui_project_to(self.designer_session.path)
+
+    def _save_gui_project_as(self) -> bool:
+        """Prompt for a new GUI project path and save it."""
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save GUI project",
+            str(self.designer_session.path or Path.cwd() / "gui-design.picogui.json"),
+            "Pico GUI projects (*.picogui.json)",
+        )
+        if not filename:
+            return False
+        if not filename.endswith(".picogui.json"):
+            filename += ".picogui.json"
+        return self._save_gui_project_to(Path(filename))
+
+    def _save_gui_project_to(self, path: Path) -> bool:
+        """Save a GUI project path with error reporting."""
+        try:
+            if path.exists():
+                backup_root = (
+                    Path(
+                        QStandardPaths.writableLocation(
+                            QStandardPaths.StandardLocation.AppDataLocation
+                        )
+                    )
+                    / "backups"
+                )
+                backup_project(path, backup_root)
+            self.designer_session.save(path)
+        except (OSError, ValueError, TypeError) as error:
+            QMessageBox.critical(self, "Cannot save GUI project", str(error))
+            return False
+        self.statusBar().showMessage(f"Saved GUI project: {path}")
+        return True
+
+    def _export_gui_python(self) -> None:
+        """Review and export the GUI design as marked Python code."""
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export GUI to Python",
+            str(Path.cwd() / "generated_gui.py"),
+            "Python files (*.py)",
+        )
+        if not filename:
+            return
+        if not filename.endswith(".py"):
+            filename += ".py"
+        try:
+            patch = build_designer_patch(self.designer_session.project, filename)
+        except (OSError, SyntaxError, ValueError) as error:
+            QMessageBox.critical(self, "Cannot export GUI", str(error))
+            return
+        dialog = DiffDialog(patch, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        backup_root = (
+            Path(
+                QStandardPaths.writableLocation(
+                    QStandardPaths.StandardLocation.AppDataLocation
+                )
+            )
+            / "backups"
+        )
+        try:
+            backup = patch.apply(backup_root)
+        except (OSError, SyntaxError, ValueError) as error:
+            QMessageBox.critical(self, "GUI export failed", str(error))
+            return
+        detail = f"Backup: {backup}" if backup else "Created a new Python file."
+        QMessageBox.information(
+            self, "GUI exported", f"Updated {patch.path}.\n{detail}"
+        )
+
+    def _confirm_designer_discard(self) -> bool:
+        """Confirm closing or replacing an unsaved GUI project."""
+        if not self.designer_session.dirty:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Save GUI project?",
+            "The GUI project has unsaved changes.",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if answer == QMessageBox.StandardButton.Save:
+            return self._save_gui_project()
+        return answer == QMessageBox.StandardButton.Discard
+
     def _scan(self, path: Path, folder: bool) -> None:
         """Scan a selected source path and refresh the catalogue."""
+        previous_key = self._asset_key(self.current_asset)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage(f"Scanning {path}...")
         QApplication.processEvents()
@@ -437,7 +1066,15 @@ class MainWindow(QMainWindow):
         self.asset_count_label.setText(f"{len(assets)} graphics found")
         self.statusBar().showMessage(f"Found {len(assets)} graphics in {path}")
         if assets:
-            self.asset_list.setCurrentRow(0)
+            preferred_row = next(
+                (
+                    index
+                    for index, asset in enumerate(assets)
+                    if self._asset_key(asset) == previous_key
+                ),
+                0,
+            )
+            self.asset_list.setCurrentRow(preferred_row)
             QTimer.singleShot(
                 0,
                 lambda current_generation=generation: self._render_next_thumbnail(
@@ -521,6 +1158,11 @@ class MainWindow(QMainWindow):
     def _load_asset(self, asset: GraphicsAsset) -> None:
         """Render one asset and populate its controls."""
         self._stop_animation()
+        asset_key = self._asset_key(asset)
+        if self.animation_asset_key not in {None, asset_key}:
+            self.animation_asset_key = None
+            self.animation_images.clear()
+            self.animation_drafts.clear()
         self.current_asset = asset
         self.variant_values = {
             name: asset.parameters.get(name, values[0] if values else 0)
@@ -555,9 +1197,23 @@ class MainWindow(QMainWindow):
                 self.frame_combo.addItem(
                     self._animation_frame_label(self.animation_parameter, value), value
                 )
+            if self.animation_asset_key == self._asset_key(asset):
+                existing = {
+                    self.frame_combo.itemData(index)
+                    for index in range(self.frame_combo.count())
+                }
+                for value in self.animation_images:
+                    if value not in existing:
+                        self.frame_combo.addItem(
+                            self._animation_frame_label(
+                                self.animation_parameter, value
+                            ),
+                            value,
+                        )
             current = self.variant_values.get(self.animation_parameter)
             self.frame_combo.setCurrentIndex(max(0, self.frame_combo.findData(current)))
         self.frame_combo.blockSignals(False)
+        self._refresh_animation_labels()
         self.animation_group.setVisible(self.animation_parameter is not None)
         for name, values in asset.variants.items():
             if name == self.animation_parameter:
@@ -578,6 +1234,17 @@ class MainWindow(QMainWindow):
         if parameter == "animation_time":
             return f"{value} ms"
         return f"Frame {value}"
+
+    def _refresh_animation_labels(self) -> None:
+        """Mark externally imported frames in the selector."""
+        if self.animation_parameter is None:
+            return
+        for index in range(self.frame_combo.count()):
+            value = self.frame_combo.itemData(index)
+            label = self._animation_frame_label(self.animation_parameter, value)
+            if value in self.animation_images:
+                label += " - imported"
+            self.frame_combo.setItemText(index, label)
 
     def _variant_changed(self) -> None:
         """Render the newly selected parameter variant."""
@@ -628,6 +1295,86 @@ class MainWindow(QMainWindow):
             self.frame_combo.setCurrentIndex(
                 (self.frame_combo.currentIndex() + 1) % count
             )
+
+    def _add_animation_frame(self) -> None:
+        """Add a new editable animation frame value."""
+        if self.current_asset is None or self.animation_parameter is None:
+            return
+        value = self._next_animation_value()
+        self.animation_asset_key = self._asset_key(self.current_asset)
+        draft = (
+            self.current_trace.current_art.copy()
+            if self.current_trace
+            else self.canvas.art().copy()
+        )
+        self.animation_drafts[value] = draft
+        self.animation_images[value] = pixel_art_image(draft)
+        self.frame_combo.addItem(
+            self._animation_frame_label(self.animation_parameter, value), value
+        )
+        self._refresh_animation_labels()
+        self.frame_combo.setCurrentIndex(self.frame_combo.count() - 1)
+
+    def _duplicate_animation_frame(self) -> None:
+        """Duplicate the current animation frame into a new value."""
+        if self.current_asset is None or self.animation_parameter is None:
+            return
+        value = self._next_animation_value()
+        self.animation_asset_key = self._asset_key(self.current_asset)
+        draft = self.canvas.art().copy()
+        self.animation_drafts[value] = draft
+        self.animation_images[value] = pixel_art_image(draft)
+        self.frame_combo.addItem(
+            self._animation_frame_label(self.animation_parameter, value), value
+        )
+        self._refresh_animation_labels()
+        self.frame_combo.setCurrentIndex(self.frame_combo.count() - 1)
+
+    def _delete_animation_frame(self) -> None:
+        """Remove one imported or newly added animation frame."""
+        if self.frame_combo.count() <= 1:
+            return
+        if self._dirty and not self._confirm_discard():
+            return
+        value = self.frame_combo.currentData()
+        if value not in self.animation_images:
+            QMessageBox.information(
+                self,
+                "Source frame retained",
+                "Frames inferred from handwritten Python cannot be deleted here.",
+            )
+            return
+        index = self.frame_combo.currentIndex()
+        self.animation_images.pop(value, None)
+        self.animation_drafts.pop(value, None)
+        self.frame_combo.removeItem(index)
+        self.frame_combo.setCurrentIndex(min(index, self.frame_combo.count() - 1))
+
+    def _move_animation_frame(self, direction: int) -> None:
+        """Move the current frame within preview playback order."""
+        index = self.frame_combo.currentIndex()
+        target = index + direction
+        if index < 0 or target < 0 or target >= self.frame_combo.count():
+            return
+        text = self.frame_combo.itemText(index)
+        value = self.frame_combo.itemData(index)
+        self.frame_combo.blockSignals(True)
+        self.frame_combo.removeItem(index)
+        self.frame_combo.insertItem(target, text, value)
+        self.frame_combo.setCurrentIndex(target)
+        self.frame_combo.blockSignals(False)
+
+    def _next_animation_value(self) -> int:
+        """Return the next numeric frame or timing value."""
+        values = [
+            self.frame_combo.itemData(index)
+            for index in range(self.frame_combo.count())
+        ]
+        integers = [value for value in values if type(value) is int]
+        current_max = max(integers, default=-1)
+        if self.animation_parameter == "animation_time":
+            return current_max + self.frame_interval_spin.value()
+        return current_max + 1
 
     def _toggle_animation(self, playing: bool) -> None:
         """Start or stop animation preview playback."""
@@ -686,7 +1433,12 @@ class MainWindow(QMainWindow):
         except Exception:
             self.canvas.set_onion_art(None)
             return
-        self.canvas.set_onion_art(previous_trace.current_art)
+        self.canvas.set_onion_art(
+            self._animation_art(
+                previous_trace,
+                previous_values[self.animation_parameter],
+            )
+        )
 
     def _render_current(self) -> None:
         """Trace and display the current graphics function."""
@@ -699,8 +1451,9 @@ class MainWindow(QMainWindow):
             self.apply_button.setEnabled(False)
             return
         self.current_trace = trace
+        displayed_art = self._animation_art(trace)
         self._suppress_changes = True
-        self.canvas.set_art(trace.current_art)
+        self.canvas.set_art(displayed_art)
         self._suppress_changes = False
         self._update_onion_skin()
         self._dirty = False
@@ -728,6 +1481,10 @@ class MainWindow(QMainWindow):
             )
         except ValueError:
             self._dirty = True
+        if self.animation_parameter is not None:
+            frame_value = self.variant_values.get(self.animation_parameter)
+            if frame_value in self.animation_images:
+                self.animation_drafts[frame_value] = self.canvas.art().copy()
         self._update_preview()
         self._update_apply_state()
 
@@ -740,7 +1497,7 @@ class MainWindow(QMainWindow):
         )
         self.apply_button.setEnabled(enabled)
         self.apply_action.setEnabled(enabled)
-        title = "Pico Graphics Editor"
+        title = "Pico Graphics and GUI Designer"
         if self.current_asset is not None:
             title += f" - {self.current_asset.record.name}"
         self.setWindowTitle(title + (" *" if self._dirty else ""))
@@ -902,7 +1659,11 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Python updated",
-            f"Updated {patch.path.name}.\nBackup: {backup_path}",
+            (
+                f"Updated {patch.path.name}.\nBackup: {backup_path}"
+                if backup_path
+                else f"Created {patch.path.name}."
+            ),
         )
         self._scan(self._scan_path or patch.path, self._scan_folder)
 
@@ -960,6 +1721,53 @@ class MainWindow(QMainWindow):
         self.export_button.setEnabled(False)
         self.apply_action.setEnabled(False)
         self.export_action.setEnabled(False)
+
+    def _animation_art(self, trace: TraceResult, value: Any = None) -> PixelArt:
+        """Return an imported or source-rendered animation frame."""
+        if self.animation_parameter is None:
+            return trace.current_art
+        if value is None:
+            value = self.variant_values.get(self.animation_parameter)
+        if value not in self.animation_images:
+            return trace.current_art
+        draft = self.animation_drafts.get(value)
+        if (
+            draft is not None
+            and draft.width == trace.current_art.width
+            and draft.height == trace.current_art.height
+            and draft.origin_x == trace.current_art.origin_x
+            and draft.origin_y == trace.current_art.origin_y
+        ):
+            return draft
+        prepared = prepare_reference_image(
+            self.animation_images[value],
+            trace.current_art.width,
+            trace.current_art.height,
+            "contain",
+        )
+        converted = image_to_pixel_art(
+            prepared,
+            trace.current_art.width,
+            trace.current_art.height,
+            self.reference_colors_spin.value(),
+            self.reference_dither_check.isChecked(),
+        )
+        converted.origin_x = trace.current_art.origin_x
+        converted.origin_y = trace.current_art.origin_y
+        merged = trace.current_art.copy()
+        for y in range(converted.height):
+            for x in range(converted.width):
+                color = converted.pixel(x, y)
+                if color is not None:
+                    merged.set_pixel(x, y, color)
+        self.animation_drafts[value] = merged
+        return merged
+
+    def _asset_key(self, asset: GraphicsAsset | None) -> tuple[Path, str] | None:
+        """Return a stable source asset identity."""
+        if asset is None:
+            return None
+        return asset.document.path, asset.record.qualified_name
 
 
 def color_button_style(color: int) -> str:

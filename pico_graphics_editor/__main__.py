@@ -15,13 +15,13 @@ from .window import MainWindow
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line argument parser."""
     parser = argparse.ArgumentParser(
-        description="Edit Python renderer graphics with a mouse-driven pixel canvas."
+        description="Edit Python graphics and design complete application GUIs."
     )
     parser.add_argument(
         "path",
         nargs="?",
         type=Path,
-        help="Python file or project folder to scan on startup",
+        help="Python source, project folder, or .picogui.json file to open",
     )
     return parser
 
@@ -30,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     """Create the Qt application and run its event loop."""
     arguments = build_parser().parse_args(argv)
     QCoreApplication.setOrganizationName("Picoware")
-    QCoreApplication.setApplicationName("Pico Graphics Editor")
+    QCoreApplication.setApplicationName("Pico Graphics and GUI Designer")
     application = QApplication(sys.argv[:1])
     application.setStyle("Fusion")
     window = MainWindow()

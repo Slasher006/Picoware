@@ -13,7 +13,13 @@ REPOSITORY_PATH = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_PATH) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_PATH))
 
-from pico_graphics_editor.source import SourceExporter, SourceScanner, TraceInterpreter
+from pico_graphics_editor.model import PixelArt
+from pico_graphics_editor.source import (
+    SourceExporter,
+    SourceScanner,
+    TraceInterpreter,
+    build_new_graphic_patch,
+)
 
 
 SAMPLE_SOURCE = '''"""Renderer fixture."""
@@ -143,6 +149,26 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(slime.variants["frame"], list(range(8)))
         trace = self.tracer.render(solid, {"theme": 0})
         self.assertGreaterEqual(len(trace.primitives), 4)
+
+    def test_new_reference_graphic_generates_frames(self) -> None:
+        """Generate a parseable new animated RGB565 function."""
+        first = PixelArt(4, 4)
+        first.set_pixel(1, 1, 0xF800)
+        second = PixelArt(4, 4)
+        second.set_pixel(2, 1, 0x07E0)
+        target = self.root / "new_graphic.py"
+        patch = build_new_graphic_patch(target, "draw_ship", [first, second])
+        ast.parse(patch.updated)
+        self.assertIn("def draw_ship(draw, x, y, frame=0):", patch.updated)
+        self.assertIn("if frame == 1:", patch.updated)
+        self.assertEqual(patch.run_count, 2)
+        backup = patch.apply(self.root / "backups")
+        assets = self.scanner.scan_file(target)
+        generated = next(asset for asset in assets if asset.record.name == "draw_ship")
+        trace = self.tracer.render(generated, {"frame": 1})
+        self.assertIsNone(backup)
+        self.assertEqual(generated.variants["frame"], list(range(8)))
+        self.assertGreaterEqual(len(trace.primitives), 1)
 
 
 if __name__ == "__main__":

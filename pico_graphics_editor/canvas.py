@@ -7,6 +7,7 @@ from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QWheelEve
 from PySide6.QtWidgets import QWidget
 
 from .model import PixelArt, rgb565_to_rgb
+from .reference import image_to_pixel_art, prepare_reference_image
 
 
 class PixelCanvas(QWidget):
@@ -33,8 +34,22 @@ class PixelCanvas(QWidget):
         self._last: tuple[int, int] | None = None
         self._gesture_base: PixelArt | None = None
         self._display_cache: QImage | None = None
+        self._checker_cache: QImage | None = None
         self._onion_art: PixelArt | None = None
         self._onion_cache: QImage | None = None
+        self._reference_source: QImage | None = None
+        self._reference_cache: QImage | None = None
+        self._reference_opacity = 0.55
+        self._reference_foreground = False
+        self._reference_options: dict[str, object] = {
+            "mode": "contain",
+            "rotation": 0,
+            "flip_horizontal": False,
+            "flip_vertical": False,
+            "scale_percent": 100,
+            "offset_x": 0,
+            "offset_y": 0,
+        }
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._update_size()
@@ -50,9 +65,26 @@ class PixelCanvas(QWidget):
         self._redo.clear()
         self._gesture_base = None
         self._display_cache = None
+        self._checker_cache = None
         self._onion_art = None
         self._onion_cache = None
+        self._rebuild_reference_cache()
         self._update_size()
+        self.update()
+        self.document_changed.emit()
+
+    def apply_art(self, art: PixelArt) -> None:
+        """Apply compatible pixel art as one undoable edit."""
+        if (
+            art.width != self._art.width
+            or art.height != self._art.height
+            or art.origin_x != self._art.origin_x
+            or art.origin_y != self._art.origin_y
+        ):
+            raise ValueError("Pixel surfaces are not aligned")
+        self._push_undo()
+        self._art = art.copy()
+        self._display_cache = None
         self.update()
         self.document_changed.emit()
 
@@ -111,6 +143,68 @@ class PixelCanvas(QWidget):
             self._onion_cache = pixel_art_image(self._onion_art)
         self.update()
 
+    def set_reference_image(self, image: QImage | None) -> None:
+        """Set or clear the tracing reference image."""
+        self._reference_source = None if image is None else image.copy()
+        self._rebuild_reference_cache()
+        self.update()
+
+    def has_reference_image(self) -> bool:
+        """Return whether a tracing reference is loaded."""
+        return self._reference_source is not None
+
+    def reference_source_image(self) -> QImage | None:
+        """Return a copy of the untransformed tracing reference."""
+        return None if self._reference_source is None else self._reference_source.copy()
+
+    def set_reference_opacity(self, percent: int) -> None:
+        """Set the tracing reference opacity percentage."""
+        self._reference_opacity = max(0, min(100, percent)) / 100
+        self.update()
+
+    def set_reference_foreground(self, foreground: bool) -> None:
+        """Place the reference above or below active pixels."""
+        self._reference_foreground = foreground
+        self.update()
+
+    def set_reference_options(
+        self,
+        mode: str,
+        rotation: int,
+        flip_horizontal: bool,
+        flip_vertical: bool,
+        scale_percent: int,
+        offset_x: int,
+        offset_y: int,
+    ) -> None:
+        """Update reference placement and transformation options."""
+        self._reference_options = {
+            "mode": mode,
+            "rotation": rotation,
+            "flip_horizontal": flip_horizontal,
+            "flip_vertical": flip_vertical,
+            "scale_percent": scale_percent,
+            "offset_x": offset_x,
+            "offset_y": offset_y,
+        }
+        self._rebuild_reference_cache()
+        self.update()
+
+    def reference_art(self, color_count: int, dither: bool) -> PixelArt | None:
+        """Convert the positioned reference into editable pixel art."""
+        if self._reference_cache is None:
+            return None
+        art = image_to_pixel_art(
+            self._reference_cache,
+            self._art.width,
+            self._art.height,
+            color_count,
+            dither,
+        )
+        art.origin_x = self._art.origin_x
+        art.origin_y = self._art.origin_y
+        return art
+
     def can_undo(self) -> bool:
         """Return whether an edit can be undone."""
         return bool(self._undo)
@@ -148,16 +242,28 @@ class PixelCanvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
         cell = self._zoom
-        if self._display_cache is None:
-            self._display_cache = pixel_art_image(
-                self._art,
+        if self._checker_cache is None:
+            self._checker_cache = pixel_art_image(
+                PixelArt(self._art.width, self._art.height),
                 transparent=False,
                 checker=True,
             )
+        if self._display_cache is None:
+            self._display_cache = pixel_art_image(self._art)
+        target = QRect(0, 0, self._art.width * cell, self._art.height * cell)
+        painter.drawImage(target, self._checker_cache)
+        if self._reference_cache is not None and not self._reference_foreground:
+            painter.setOpacity(self._reference_opacity)
+            painter.drawImage(target, self._reference_cache)
+            painter.setOpacity(1.0)
         painter.drawImage(
-            QRect(0, 0, self._art.width * cell, self._art.height * cell),
+            target,
             self._display_cache,
         )
+        if self._reference_cache is not None and self._reference_foreground:
+            painter.setOpacity(self._reference_opacity)
+            painter.drawImage(target, self._reference_cache)
+            painter.setOpacity(1.0)
         if self._onion_cache is not None:
             painter.setOpacity(0.28)
             painter.drawImage(
@@ -279,6 +385,18 @@ class PixelCanvas(QWidget):
     def _update_size(self) -> None:
         """Update fixed size for scrolling."""
         self.setFixedSize(self.sizeHint())
+
+    def _rebuild_reference_cache(self) -> None:
+        """Rebuild the transformed tracing reference."""
+        if self._reference_source is None:
+            self._reference_cache = None
+            return
+        self._reference_cache = prepare_reference_image(
+            self._reference_source,
+            self._art.width,
+            self._art.height,
+            **self._reference_options,
+        )
 
 
 def qcolor_from_rgb565(color: int) -> QColor:

@@ -201,13 +201,15 @@ class SourcePatch:
     key: str
     run_count: int
 
-    def apply(self, backup_root: Path) -> Path:
+    def apply(self, backup_root: Path) -> Path | None:
         """Back up the source and atomically apply the patch."""
         ast.parse(self.updated, filename=str(self.path))
         backup_root.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        backup_path = backup_root / f"{self.path.name}.{timestamp}.bak"
-        shutil.copy2(self.path, backup_path)
+        backup_path: Path | None = None
+        if self.path.exists():
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            backup_path = backup_root / f"{self.path.name}.{timestamp}.bak"
+            shutil.copy2(self.path, backup_path)
         file_handle, temporary_name = tempfile.mkstemp(
             prefix=f".{self.path.name}.",
             suffix=".tmp",
@@ -718,6 +720,85 @@ class SourceExporter:
             key,
             len(runs),
         )
+
+
+def build_new_graphic_patch(
+    path: str | Path,
+    function_name: str,
+    frames: list[PixelArt],
+) -> SourcePatch:
+    """Build a source patch containing a new generated graphic function."""
+    if not frames:
+        raise ValueError("At least one graphic frame is required")
+    target = Path(path)
+    original = target.read_text(encoding="utf-8") if target.exists() else ""
+    normalized_name = re.sub(r"\W+", "_", function_name.strip()).strip("_")
+    if not normalized_name:
+        raise ValueError("A valid graphic function name is required")
+    if normalized_name[0].isdigit():
+        normalized_name = f"draw_{normalized_name}"
+    generated, run_count = _new_graphic_source(normalized_name, frames)
+    marker = re.compile(
+        rf"^# Pico graphic {re.escape(normalized_name)} begin\n.*?^# Pico graphic {re.escape(normalized_name)} end\n?",
+        re.MULTILINE | re.DOTALL,
+    )
+    if marker.search(original):
+        updated = marker.sub(generated, original, count=1)
+    else:
+        separator = "" if not original or original.endswith("\n\n") else "\n"
+        if original and not original.endswith("\n"):
+            separator = "\n\n"
+        updated = original + separator + generated
+    ast.parse(updated, filename=str(target))
+    diff = "".join(
+        difflib.unified_diff(
+            original.splitlines(keepends=True),
+            updated.splitlines(keepends=True),
+            fromfile=str(target),
+            tofile=str(target),
+        )
+    )
+    return SourcePatch(
+        target,
+        original,
+        updated,
+        diff,
+        f"new-graphic-{normalized_name}",
+        run_count,
+    )
+
+
+def _new_graphic_source(function_name: str, frames: list[PixelArt]) -> tuple[str, int]:
+    """Generate one module-level RGB565 graphic function."""
+    animated = len(frames) > 1
+    parameters = "draw, x, y, frame=0" if animated else "draw, x, y"
+    lines = [
+        f"# Pico graphic {function_name} begin\n",
+        f"def {function_name}({parameters}):\n",
+        '    """Draw generated RGB565 pixel graphics."""\n',
+    ]
+    run_count = 0
+    for frame_index, art in enumerate(frames):
+        blank = PixelArt(art.width, art.height, art.origin_x, art.origin_y)
+        runs = art.horizontal_runs(blank)
+        run_count += len(runs)
+        indent = "    "
+        if animated:
+            lines.append(f"    if frame == {frame_index}:\n")
+            indent = "        "
+        if not runs:
+            lines.append(f"{indent}return\n" if animated else f"{indent}pass\n")
+            continue
+        for run_x, run_y, width, color in runs:
+            x_expression = offset_expression("x", art.origin_x + run_x)
+            y_expression = offset_expression("y", art.origin_y + run_y)
+            lines.append(
+                f"{indent}draw._fill_rectangle({x_expression}, {y_expression}, {width}, 1, 0x{color:04X})\n"
+            )
+        if animated:
+            lines.append(f"{indent}return\n")
+    lines.append(f"# Pico graphic {function_name} end\n")
+    return "".join(lines), run_count
 
 
 def call_name(node: ast.AST) -> str:

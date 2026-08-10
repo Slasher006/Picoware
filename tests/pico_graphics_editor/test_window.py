@@ -64,6 +64,24 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(self.window.variant_values["frame"], 1)
         self.assertNotEqual(first_pixels, self.window.canvas.art().pixels)
 
+    def test_window_exposes_three_design_workspaces(self) -> None:
+        """Expose pixel, screen, and flow editing modes."""
+        self.assertEqual(self.window.workspace_tabs.count(), 3)
+        self.assertEqual(
+            [self.window.workspace_tabs.tabText(index) for index in range(3)],
+            ["Pixel Art", "App GUI", "Screen Flow"],
+        )
+
+    def test_animation_frames_can_be_duplicated_and_reordered(self) -> None:
+        """Duplicate a source frame and change playback order."""
+        original_count = self.window.frame_combo.count()
+        self.window._duplicate_animation_frame()
+        self.assertEqual(self.window.frame_combo.count(), original_count + 1)
+        duplicated_value = self.window.frame_combo.currentData()
+        self.window._move_animation_frame(-1)
+        self.assertEqual(self.window.frame_combo.currentData(), duplicated_value)
+        self.assertIn(duplicated_value, self.window.animation_drafts)
+
     def test_playback_and_onion_skin_are_available(self) -> None:
         """Enable frame playback and the previous-frame overlay."""
         self.window.frame_combo.setCurrentIndex(1)

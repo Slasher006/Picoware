@@ -5,7 +5,7 @@ Open-source custom firmware for PicoCalc, Cardputer ADV, Flipper Zero, and other
 
 ### Features
 - [Desktop Companion App](./app/README.md) with USB Video Stream and App Store
-- [Pico Graphics Editor](./pico_graphics_editor/README.md) for Python-rendered pixel art
+- [Pico Graphics and GUI Designer](./pico_graphics_editor/README.md) for pixel art, application screens, and screen-flow graphs
 - Desktop Simulator (runs Picoware on Mac/Linux with SDL2)
 - On-Device Code Editor
 - On-Device REPL
