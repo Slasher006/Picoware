@@ -1,0 +1,26 @@
+app MQTT Client
+wait 180
+key enter
+wait 30
+key right
+wait 10
+key enter
+wait 30
+key right
+wait 10
+key right
+wait 10
+key enter
+wait 30
+key enter
+wait 30
+key right
+wait 10
+key right
+wait 10
+key right
+wait 10
+key right
+wait 10
+key enter
+wait 80

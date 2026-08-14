@@ -1,0 +1,10 @@
+# Launch the exported editor-built app, connect to the simulator's loopback
+# broker, then publish one deterministic test message.
+app MQTT Client
+wait 180
+key enter
+wait 40
+key right
+wait 20
+key enter
+wait 100

@@ -15,7 +15,7 @@ if str(REPOSITORY_PATH) not in sys.path:
 
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
-from PySide6.QtTest import QTest
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QScrollArea
 
 from pico_graphics_editor.canvas import PixelCanvas, pixel_art_image
@@ -55,6 +55,39 @@ class CanvasTests(unittest.TestCase):
         self.canvas.undo()
         self.assertIsNone(self.canvas.art().pixel(2, 3))
 
+    def test_large_pencil_stroke_patches_cache_and_commits_once(self) -> None:
+        """Avoid full-image cache and preview work for every pointer movement."""
+        self.canvas.set_art(PixelArt(320, 320))
+        self.canvas.set_zoom(2)
+        self.canvas.set_color(0xF800)
+        self.canvas.grab()
+        display_cache = self.canvas._display_cache
+        self.assertIsNotNone(display_cache)
+        changes = QSignalSpy(self.canvas.document_changed)
+
+        QTest.mousePress(
+            self.canvas,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPoint(20, 20),
+        )
+        for coordinate in (30, 40, 50, 60, 70):
+            QTest.mouseMove(self.canvas, QPoint(coordinate, coordinate))
+        self.assertEqual(changes.count(), 0)
+        self.assertIs(self.canvas._display_cache, display_cache)
+        QTest.mouseRelease(
+            self.canvas,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPoint(70, 70),
+        )
+
+        self.assertEqual(changes.count(), 1)
+        self.assertEqual(self.canvas.art().pixel(10, 10), 0xF800)
+        self.assertEqual(self.canvas.art().pixel(35, 35), 0xF800)
+        self.canvas.undo()
+        self.assertIsNone(self.canvas.art().pixel(10, 10))
+
     def test_managed_eraser_clears_to_transparency(self) -> None:
         """Erase managed pixels without painting a replacement color."""
         art = PixelArt(8, 8)
@@ -84,6 +117,25 @@ class CanvasTests(unittest.TestCase):
         self.assertEqual(self.canvas.art().pixel(2, 1), 0x07E0)
         self.canvas.undo()
         self.assertIsNone(self.canvas.art().pixel(1, 1))
+
+    def test_system_clipboard_moves_lossless_pixels_between_canvases(self) -> None:
+        """Copy transparent RGB565 pixels between separate editor canvases."""
+        art = PixelArt(3, 2)
+        art.set_pixel(0, 0, 0xF800)
+        art.set_pixel(2, 1, 0x07E0)
+        self.canvas.set_art(art)
+        self.canvas.select_all()
+        self.assertTrue(self.canvas.copy_selection())
+        other = PixelCanvas()
+        other.set_art(PixelArt(4, 4))
+        self.assertTrue(other.has_clipboard())
+        self.assertTrue(other.paste_selection())
+        self.assertEqual(other.art().pixel(0, 0), 0xF800)
+        self.assertIsNone(other.art().pixel(1, 0))
+        self.assertEqual(other.art().pixel(2, 1), 0x07E0)
+        other.close()
+        self.application.clipboard().clear()
+        self.application.processEvents()
 
     def test_selection_drag_moves_pixels_as_one_edit(self) -> None:
         """Move selected pixels with a mouse drag and undo the gesture."""

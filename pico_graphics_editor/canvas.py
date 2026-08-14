@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+import json
+
+from PySide6.QtCore import QMimeData, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QWheelEvent
-from PySide6.QtWidgets import QAbstractScrollArea, QWidget
+from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QWidget
 
 from .model import PixelArt, rgb565_to_rgb
 from .reference import image_to_pixel_art, prepare_reference_image
@@ -18,6 +20,7 @@ class PixelCanvas(QWidget):
     cursor_changed = Signal(int, int, object)
     selection_changed = Signal(bool)
     zoom_changed = Signal(int)
+    PIXEL_MIME_TYPE = "application/x-pico-graphics-pixels+json"
 
     def __init__(self, parent: QWidget | None = None):
         """Initialize the editable canvas."""
@@ -147,15 +150,41 @@ class PixelCanvas(QWidget):
         self._set_selection(None)
 
     def copy_selection(self) -> bool:
-        """Copy selected pixels into the internal pixel clipboard."""
+        """Copy selected pixels to the shared lossless and PNG clipboard."""
         if self._selection is None:
             return False
         self._clipboard = self._copy_rect(self._selection)
+        application = QApplication.instance()
+        if application is not None:
+            payload = {
+                "width": self._clipboard.width,
+                "height": self._clipboard.height,
+                "origin_x": self._clipboard.origin_x,
+                "origin_y": self._clipboard.origin_y,
+                "pixels": self._clipboard.pixels,
+            }
+            mime = QMimeData()
+            mime.setData(
+                self.PIXEL_MIME_TYPE,
+                json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            )
+            mime.setImageData(pixel_art_image(self._clipboard, checker=False))
+            application.clipboard().setMimeData(mime)
         return True
 
     def has_clipboard(self) -> bool:
-        """Return whether the internal pixel clipboard has content."""
-        return self._clipboard is not None
+        """Return whether internal or system pixel clipboard data is available."""
+        application = QApplication.instance()
+        if application is None:
+            return self._clipboard is not None
+        mime = application.clipboard().mimeData()
+        if mime is None:
+            return self._clipboard is not None
+        return bool(
+            self._clipboard is not None
+            or mime.hasFormat(self.PIXEL_MIME_TYPE)
+            or mime.hasImage()
+        )
 
     def cut_selection(self) -> bool:
         """Copy and clear the active pixel selection."""
@@ -164,24 +193,48 @@ class PixelCanvas(QWidget):
         return self.delete_selection()
 
     def paste_selection(self) -> bool:
-        """Paste internal clipboard pixels at the selection or canvas origin."""
-        if self._clipboard is None:
+        """Paste lossless shared pixels, PNG pixels, or internal fallback data."""
+        clipboard_art = self._clipboard_art()
+        if clipboard_art is None:
             return False
         target_x = self._selection.x() if self._selection is not None else 0
         target_y = self._selection.y() if self._selection is not None else 0
         self._push_undo()
-        for y in range(self._clipboard.height):
-            for x in range(self._clipboard.width):
+        for y in range(clipboard_art.height):
+            for x in range(clipboard_art.width):
                 self._art.set_pixel(
                     target_x + x,
                     target_y + y,
-                    self._clipboard.pixel(x, y),
+                    clipboard_art.pixel(x, y),
                 )
-        width = min(self._clipboard.width, self._art.width - target_x)
-        height = min(self._clipboard.height, self._art.height - target_y)
+        width = min(clipboard_art.width, self._art.width - target_x)
+        height = min(clipboard_art.height, self._art.height - target_y)
         self._set_selection(QRect(target_x, target_y, width, height), emit=False)
         self._finish_edit()
         return True
+
+    def _clipboard_art(self) -> PixelArt | None:
+        """Decode the preferred shared clipboard representation."""
+        application = QApplication.instance()
+        if application is not None:
+            mime = application.clipboard().mimeData()
+            if mime is not None and mime.hasFormat(self.PIXEL_MIME_TYPE):
+                try:
+                    values = json.loads(bytes(mime.data(self.PIXEL_MIME_TYPE)))
+                    return PixelArt(
+                        int(values["width"]),
+                        int(values["height"]),
+                        int(values.get("origin_x", 0)),
+                        int(values.get("origin_y", 0)),
+                        values["pixels"],
+                    )
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    pass
+            if mime is not None and mime.hasImage():
+                image = QImage(mime.imageData())
+                if not image.isNull():
+                    return image_to_pixel_art(image, image.width(), image.height(), 256)
+        return self._clipboard.copy() if self._clipboard is not None else None
 
     def delete_selection(self) -> bool:
         """Clear selected pixels to transparency."""
@@ -455,9 +508,14 @@ class PixelCanvas(QWidget):
             painter.setOpacity(1.0)
         if self._show_grid and cell >= 6:
             painter.setPen(QPen(QColor(0, 0, 0, 55), 1))
-            for x in range(self._art.width + 1):
+            exposed = event.rect()
+            first_x = max(0, exposed.left() // cell)
+            last_x = min(self._art.width, exposed.right() // cell + 1)
+            first_y = max(0, exposed.top() // cell)
+            last_y = min(self._art.height, exposed.bottom() // cell + 1)
+            for x in range(first_x, last_x + 1):
                 painter.drawLine(x * cell, 0, x * cell, self._art.height * cell)
-            for y in range(self._art.height + 1):
+            for y in range(first_y, last_y + 1):
                 painter.drawLine(0, y * cell, self._art.width * cell, y * cell)
         if self._selection is not None:
             selection = QRect(
@@ -488,7 +546,10 @@ class PixelCanvas(QWidget):
         if point is None:
             return
         x, y = point
-        if event.button() == Qt.MouseButton.RightButton or self._tool == "picker":
+        if event.button() == Qt.MouseButton.RightButton:
+            event.accept()
+            return
+        if self._tool == "picker":
             color = self._art.pixel(x, y)
             if color is not None:
                 self.color_picked.emit(color)
@@ -513,16 +574,16 @@ class PixelCanvas(QWidget):
         self._drawing = True
         self._start = point
         self._last = point
-        self._gesture_base = self._art.copy()
+        self._gesture_base = (
+            self._art.copy() if self._tool in {"line", "rectangle"} else None
+        )
         if self._tool == "fill":
             self._art.flood_fill(x, y, self._color)
             self._display_cache = None
             self._finish_gesture()
         elif self._tool in {"pencil", "eraser"}:
             self._art.set_pixel(x, y, self._paint_color())
-            self._display_cache = None
-            self.update()
-            self.document_changed.emit()
+            self._refresh_display_rect(x, y, x, y)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         """Continue drawing and report cursor coordinates."""
@@ -599,12 +660,18 @@ class PixelCanvas(QWidget):
                 self._last = point
                 self._display_cache = None
                 self.update()
-                self.document_changed.emit()
             return
         if self._tool in {"pencil", "eraser"} and self._last is not None:
             last_x, last_y = self._last
             self._art.draw_line(last_x, last_y, x, y, self._paint_color())
             self._last = point
+            self._refresh_display_rect(
+                min(last_x, x),
+                min(last_y, y),
+                max(last_x, x),
+                max(last_y, y),
+            )
+            return
         elif (
             self._tool in {"line", "rectangle"}
             and self._gesture_base is not None
@@ -622,7 +689,6 @@ class PixelCanvas(QWidget):
                 )
         self._display_cache = None
         self.update()
-        self.document_changed.emit()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         """Finish the active drawing gesture."""
@@ -659,6 +725,42 @@ class PixelCanvas(QWidget):
         if self._tool == "eraser" and self._erase_transparent:
             return None
         return self._background if self._tool == "eraser" else self._color
+
+    def _refresh_display_rect(
+        self,
+        left: int,
+        top: int,
+        right: int,
+        bottom: int,
+    ) -> None:
+        """Patch changed pixels into the display cache and repaint only that area."""
+        left = max(0, left)
+        top = max(0, top)
+        right = min(self._art.width - 1, right)
+        bottom = min(self._art.height - 1, bottom)
+        if left > right or top > bottom:
+            return
+        if self._display_cache is None:
+            self._display_cache = pixel_art_image(self._art)
+        transparent = QColor(0, 0, 0, 0)
+        for y in range(top, bottom + 1):
+            row = y * self._art.width
+            for x in range(left, right + 1):
+                color = self._art.pixels[row + x]
+                self._display_cache.setPixelColor(
+                    x,
+                    y,
+                    transparent if color is None else qcolor_from_rgb565(color),
+                )
+        cell = self._zoom
+        self.update(
+            QRect(
+                left * cell,
+                top * cell,
+                (right - left + 1) * cell,
+                (bottom - top + 1) * cell,
+            ).adjusted(-1, -1, 1, 1)
+        )
 
     def _pixel_at(self, point: QPoint) -> tuple[int, int] | None:
         """Convert widget coordinates into pixel coordinates."""

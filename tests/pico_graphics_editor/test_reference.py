@@ -5,6 +5,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch as mock_patch
 
 
 REPOSITORY_PATH = Path(__file__).resolve().parents[2]
@@ -16,6 +17,7 @@ from PySide6.QtGui import QColor, QImage
 from pico_graphics_editor.reference import (
     image_to_pixel_art,
     prepare_reference_image,
+    read_image_frames_with_durations,
     split_sprite_sheet,
 )
 
@@ -47,6 +49,41 @@ class ReferenceTests(unittest.TestCase):
         frames = split_sprite_sheet(sheet, 4, 2)
         self.assertEqual(len(frames), 4)
         self.assertEqual((frames[0].width(), frames[0].height()), (4, 2))
+
+    def test_animated_reader_preserves_variable_frame_delays(self) -> None:
+        """Carry supported GIF or WebP timing into the library review contract."""
+        images = []
+        for color in (QColor("red"), QColor("green"), QColor("blue")):
+            image = QImage(2, 2, QImage.Format.Format_ARGB32)
+            image.fill(color)
+            images.append(image)
+
+        class FakeReader:
+            def __init__(self, unused_path: str):
+                del unused_path
+                self.index = 0
+
+            def setAutoTransform(self, unused_enabled: bool) -> None:  # noqa: N802
+                del unused_enabled
+
+            def canRead(self) -> bool:  # noqa: N802
+                return self.index < len(images)
+
+            def read(self) -> QImage:
+                return images[self.index]
+
+            def nextImageDelay(self) -> int:  # noqa: N802
+                return (80, 140, 260)[self.index]
+
+            def jumpToNextImage(self) -> bool:  # noqa: N802
+                self.index += 1
+                return self.index < len(images)
+
+        with mock_patch("pico_graphics_editor.reference.QImageReader", FakeReader):
+            frames, durations = read_image_frames_with_durations("animation.gif")
+
+        self.assertEqual(len(frames), 3)
+        self.assertEqual(durations, (80, 140, 260))
 
 
 if __name__ == "__main__":

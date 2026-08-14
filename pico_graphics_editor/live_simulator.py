@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import time
 
@@ -52,6 +52,7 @@ class LiveSimulatorConfig:
     watch_path: str = ""
     auto_reload: bool = True
     design_source: str = ""
+    design_files: tuple[tuple[str, str | bytes], ...] = ()
 
 
 def rgb565_frame_image(data: bytes, width: int, height: int) -> QImage:
@@ -138,7 +139,13 @@ class LiveSimulatorController(QObject):
         apps_source = config.apps_source.strip()
         target_kind = config.target_kind
         target_name = config.target_name.strip()
-        if config.design_source:
+        if config.design_files:
+            apps_source = self._write_design_files(config.design_files)
+            if not apps_source:
+                return
+            target_kind = "Application"
+            target_name = "GuiDesignerLive"
+        elif config.design_source:
             apps_source = self._write_design_app(config.design_source)
             if not apps_source:
                 return
@@ -391,6 +398,36 @@ class LiveSimulatorController(QObject):
             apps_path.mkdir(parents=True, exist_ok=True)
             target.write_text(source, encoding="utf-8")
         except OSError as error:
+            self.error_changed.emit(f"Could not prepare the live GUI design: {error}")
+            return ""
+        return str(apps_path)
+
+    def _write_design_files(
+        self,
+        files: tuple[tuple[str, str | bytes], ...],
+    ) -> str:
+        """Stage one validated multi-file live app and binary resources."""
+        apps_path = Path(self._temporary.path()) / "design_apps"
+        names = {name for name, unused_content in files}
+        if "GuiDesignerLive.py" not in names:
+            self.error_changed.emit("Live design bundle has no GuiDesignerLive.py entrypoint.")
+            return ""
+        try:
+            for name, content in files:
+                relative = PurePosixPath(name)
+                if (
+                    not relative.parts
+                    or relative.is_absolute()
+                    or any(part in {"", ".", ".."} for part in relative.parts)
+                ):
+                    raise ValueError(f"Unsafe live design path: {name}")
+                target = apps_path.joinpath(*relative.parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if isinstance(content, bytes):
+                    target.write_bytes(content)
+                else:
+                    target.write_text(content, encoding="utf-8")
+        except (OSError, ValueError) as error:
             self.error_changed.emit(f"Could not prepare the live GUI design: {error}")
             return ""
         return str(apps_path)

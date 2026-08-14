@@ -240,7 +240,7 @@ class Toggle:
                     toggle_radius,
                     self.on_color,
                 )
-                self.display.fill_circle(
+                self.display._fill_circle(
                     toggle_center_x + toggle_radius - knob_radius - 1,
                     toggle_center_y,
                     knob_radius,

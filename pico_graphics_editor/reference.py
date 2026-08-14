@@ -89,17 +89,33 @@ def image_to_pixel_art(
 
 def read_image_frames(path: str | Path) -> list[QImage]:
     """Read all supported frames from an image file."""
+    frames, unused_durations = read_image_frames_with_durations(path)
+    del unused_durations
+    return frames
+
+
+def read_image_frames_with_durations(
+    path: str | Path,
+) -> tuple[list[QImage], tuple[int, ...]]:
+    """Read image frames together with supported per-frame delays."""
     reader = QImageReader(str(path))
     reader.setAutoTransform(True)
     frames: list[QImage] = []
+    delays: list[int] = []
     while reader.canRead():
         frame = reader.read()
         if frame.isNull():
             break
         frames.append(frame.convertToFormat(QImage.Format.Format_ARGB32))
+        delays.append(reader.nextImageDelay())
         if not reader.jumpToNextImage():
             break
-    return frames
+    durations = (
+        tuple(max(40, delay) for delay in delays)
+        if len(frames) > 1 and any(delay > 0 for delay in delays)
+        else ()
+    )
+    return frames, durations
 
 
 def split_sprite_sheet(
