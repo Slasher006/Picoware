@@ -1,6 +1,6 @@
 # Sprite3D Mesh Import Export — Blender 5
 
-Version 1.3.3 · Picoware Sprite3D mesh import/export.
+Version 1.4.4 · Picoware Sprite3D mesh import/export.
 
 The codec and Blender integration suites run against Blender 5.3.0 Alpha.
 They check byte-exact round-trips, materials, transforms, triangulation,
@@ -9,7 +9,7 @@ rendering and available memory still need testing on the target device.
 
 ## Install once
 
-1. Keep `sprite3d_mesh_io-1.3.3.zip` zipped.
+1. Keep `sprite3d_mesh_io-1.4.4.zip` zipped.
 2. Open Blender 5: **Edit → Preferences → Get Extensions**.
 3. Open the top-right drop-down menu and choose **Install from Disk…**.
 4. Select the ZIP and install it. Enable **Sprite3D Mesh Import Export** if it
@@ -189,17 +189,17 @@ The normal add-on workflow does not require either command.
 
 Select the model meshes, then use **N → Sprite3D → Export Billboard** or
 **File → Export → Picoware Billboard**. Static export bakes the current evaluated frame. Defaults are eight views
-at 8x8 pixels. Under **Advanced**, choose 1, 4 or 8 views and 8 or 16
-pixels per square view. **Model Forward** is the direction the model faces
+at 16x16 pixels. Choose optional 8x8 in **Resolution**. Under **Advanced**,
+choose 1, 4 or 8 views. **Model Forward** is the direction the model faces
 in Blender's XY ground plane (the example dragon presets -X).
 
 Export writes **one `.bin` file** containing every direction and pose,
 RGB332 pixels, transparency masks, world height, playback speed and loop setting.
 No image folder, JSON sidecar or per-asset Python loader is needed. Existing
 files are refused; choose a new name to preserve the old asset. Temporary render
-PNGs are removed automatically. All views share orthographic framing with 3%
-ground clearance. View zero looks at the front; camera azimuth increases
-counterclockwise around Blender +Z. The bake uses camera-relative studio lighting.
+PNGs are removed automatically. All views share stable orthographic framing.
+View zero looks at the front; camera azimuth decreases clockwise around Blender
++Z. Pixel Art uses flat base colors; shaded mode uses camera-relative lighting.
 
 Copy that single file to the SD card. Use the reusable loader included in this
 Picoware checkout (older firmware needs the new `billboard_asset.py` module):
@@ -236,7 +236,7 @@ been tested. Mesh export remains available independently.
 2. Select the model meshes (selecting all is fine; cameras and lights are ignored).
 3. Choose **N → Sprite3D → Export Animated Billboard**, choose a new output name,
    and export. The defaults use the timeline range and speed, four poses, eight
-   views and 8x8 pixels. No Python is needed to author or export the animation.
+   views and 16x16 pixels. No Python is needed to author or export the animation.
 
 **Preview Sampled Poses** shows exactly the poses that will be exported.
 Click **Stop Preview** to return to the original timeline frame.
@@ -244,13 +244,13 @@ The preview also stops automatically for non-looping animations. Stop normal
 Blender timeline playback before using this preview.
 
 The export dialog shows payload memory before baking: the default animated
-asset uses **2.25 KiB**, excluding object overhead and loading copies.
-The maintainer target is 8x8, with 16x16 as the maximum export size.
-At 16x16, eight views and four poses use 9 KiB of pixel and mask payload.
+asset uses **9 KiB**, excluding object overhead and loading copies.
+16x16 is the default and maximum export size; optional 8x8 reduces this
+payload to 2.25 KiB for eight views and four poses.
 For larger detail, use triangle mesh export. Existing larger packed files
 remain loadable for compatibility; their old performance results below do
 not establish a recommended billboard size.
-**Advanced** holds resolution, direction count, model-forward axis and manual
+**Advanced** holds direction count, model-forward axis and manual
 frame/rate settings. Change **Exported Poses** from 1 to 8 for the current engine.
 
 Loop export excludes the repeated closing frame: range 1–13 with four poses
@@ -337,8 +337,8 @@ The 24-byte little-endian header uses `<4sBBBBHHffI`:
 Payload order is pose first, then direction. Each frame contains width × height
 RGB332 bytes followed by ceil(width × height / 8) transparency bytes. Pixels
 are top-down, row-major; mask bits are MSB-first without row padding. A set bit
-is visible. No trailing data is allowed. A default 8-view, 4-pose, 8x8 asset
-is 2,328 bytes including its header. The 16x16 equivalent is 9,240 bytes. Older folder exports remain usable with
+is visible. No trailing data is allowed. A default 8-view, 4-pose, 16x16 asset
+is 9,240 bytes including its header. The optional 8x8 equivalent is 2,328 bytes. Older folder exports remain usable with
 their generated loader; re-export from Blender to obtain the packed format.
 
 ## Historical 64x64 runtime optimization validation
@@ -358,7 +358,7 @@ backend live on Picoware branch `perf/billboard-runtime-20261016`.
 
 ## Maintainer-size validation
 
-The normal exporter now defaults to 8x8 and permits at most 16x16. Both sizes
+These tests covered the supported 8x8 and 16x16 resolutions. Both sizes
 passed 64 full-frame native simulator checks and 96 PicoCalc render frames.
 For eight directions and four poses, 8x8 loaded in 16 ms and retained 5,456 bytes
 of heap; 16x16 loaded in 24 ms and retained 12,112 bytes. These heap figures
@@ -366,3 +366,65 @@ include object overhead, unlike the 2,304-byte and 9,216-byte image payloads.
 Tests used the same projected display size and 240 MHz CPU clock. Smaller
 source textures greatly reduced asset memory; whole-screen transfer still
 dominated frame time. These are not comparisons against triangle meshes.
+
+
+## Pixel-art billboard export
+
+Select your meshes, choose **Export Billboard** or **Export Animated Billboard**,
+and leave **Pixel Art** enabled. Choose **16 × 16** (default) or optional **8 × 8**.
+**Preview Exported Pixels** bakes the current settings and opens a separate
+window showing every direction, left to right, with native pixels at the left
+of each cell and a crisp 12× enlargement at the right. Animated exports cycle
+through their sampled poses. The initial image-editor zoom is 1:1; panning is
+safe, but zooming changes the displayed native size. Close the preview window
+or use **Stop Preview** to stop playback. After changing settings, click Preview
+again to regenerate it; rendering is not continuous while editing controls.
+
+Pixel Art uses flat Principled Base Color (including linked color textures),
+a fixed 16-color RGB332 palette shared across every pose/view, no denoising,
+and a narrow pixel filter. Materials with nodes disabled or an unconnected output use their
+viewport diffuse color. With nodes enabled, the active Cycles output must be
+connected to a Principled shader (reroutes are supported); unsupported surface
+shaders produce an explicit error. Unused shader nodes are ignored. Lighting, reflections, shader alpha, and arbitrary
+mixed-shader appearance are not reproduced in this mode. Transparency around
+geometry uses the normal binary mask; no palette color is a transparency key.
+Disable Pixel Art to retain the shaded-render workflow.
+
+**Dark Outline** adds an optional black one-pixel outside border and reserves
+space for it. At 8×8 this can crowd small features, so it starts disabled.
+**Camera Height Angle** tilts above/below the model. **View Angle** rotates all
+views relative to Model Forward; keep it at zero for exact forward-axis
+alignment with entity direction in the engine. These are export-only settings:
+the source camera, meshes, materials and timeline are preserved. Framing is
+shared across the bounds of all sampled poses and all directions, preventing
+per-frame crop/scale jumps. The packed file format and engine API are unchanged.
+
+Pixel styling cannot invent a head, horn or tail narrower than a pixel. Use
+preview to choose an angle and adjust model proportions when necessary. In the
+dragon example, side views are clearer but front-facing wing silhouettes still
+need model-specific work. This is not an automatic pixel-art redraw.
+
+Validation for 1.4.1: 37 Python unit tests, Blender deterministic 8/16-pixel
+exports with/without outlines and camera offsets, preview decode, source
+material/timeline preservation and failure cleanup. The live Blender preview
+was checked at 1:1 zoom with four poses. Both dragon assets passed 64 complete
+simulator framebuffer comparisons each, plus animation timing checks. These
+new pixel-art assets have not yet been tested on the PicoCalc.
+
+1.4.1 fixes double sRGB conversion of byte PNG bake buffers, preserving material
+colors instead of brightening them twice. Pixel-art renders also disable dithering.
+
+1.4.2 makes 16x16 the default in the export dialog and bake API; 8x8 remains selectable.
+
+
+1.4.3 corrects billboard facing during camera orbits. View 0 is the forward
+view; subsequent views move clockwise around Blender +Z, because Blender Y
+maps to negative engine ground Y. Earlier exports used the opposite order.
+Re-export older assets to correct them; the loader cannot identify this from
+the unchanged file header. No engine change is required. An asymmetric
+red-front/blue-back reference tests the view order against mesh coordinates.
+
+1.4.4 anchors the shared export framing near the bottom of the image, preventing
+wide models from floating, and reads colors from the connected surface shader.
+The [examples](examples/README.md) include dragon and oak `.blend` projects,
+`.bin` assets, export instructions, and the orbiting grove demo.

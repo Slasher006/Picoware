@@ -15,6 +15,7 @@ from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatPrope
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 from . import codec
+from .pixel_preview import SPRITE3D_OT_preview_pixel_art
 from .billboard import SPRITE3D_OT_export_billboard, SPRITE3D_OT_preview_billboard, SPRITE3D_OT_stop_preview, stop_preview
 
 ATTR_COLOR = 's3d_color565'
@@ -634,7 +635,7 @@ def _menu_export(self, context):
     animated.animated = True
 
 
-CLASSES = (SPRITE3D_OT_stop_preview, SPRITE3D_OT_preview_billboard, SPRITE3D_OT_import, SPRITE3D_OT_export, SPRITE3D_OT_export_billboard, SPRITE3D_OT_save_source,
+CLASSES = (SPRITE3D_OT_preview_pixel_art,SPRITE3D_OT_stop_preview, SPRITE3D_OT_preview_billboard, SPRITE3D_OT_import, SPRITE3D_OT_export, SPRITE3D_OT_export_billboard, SPRITE3D_OT_save_source,
            SPRITE3D_OT_self_test, SPRITE3D_PT_tools)
 
 
