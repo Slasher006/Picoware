@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "sprite3d_mesh_io"
-version = "1.0.1"
+version = "1.1.0"
 name = "Sprite3D Mesh Import Export"
 tagline = "Edit headerless Sprite3D triangle meshes directly in Blender"
 maintainer = "Sprite3D Tools"

@@ -28,6 +28,12 @@ if bpy.app.version < (5, 0, 0):
 addon.register()
 try:
     checks = addon.run_self_test(bpy.context)
+    from sprite3d_integration_test.billboard import pack_rgba
+    pixels, mask = pack_rgba([1,0,0,1, 0,1,0,0, 0,0,1,1, 1,1,1,.49], 2, 2)
+    assert pixels == bytes([3,0,224,0]) and mask == bytes([0xA0])
+    pixels, mask = pack_rgba([1,1,1,.5], 1, 1)
+    assert pixels == bytes([255]) and mask == bytes([0x80])
+    checks.append('Billboard RGB332 colors, alpha threshold, top-down rows and MSB mask packing')
     with tempfile.TemporaryDirectory(prefix='sprite3d_blender_test_') as directory:
         output = Path(directory) / 'roundtrip.sprite3d'
         status = bpy.ops.import_scene.sprite3d_mesh(filepath=str(fixture), material_preview=False)

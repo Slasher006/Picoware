@@ -1,6 +1,6 @@
 # Sprite3D Mesh Import Export — Blender 5
 
-Version 1.0.1 · Picoware Sprite3D mesh import/export.
+Version 1.1.0 · Picoware Sprite3D mesh import/export.
 
 The codec and Blender integration suites run against Blender 5.3.0 Alpha.
 They check byte-exact round-trips, materials, transforms, triangulation,
@@ -9,7 +9,7 @@ rendering and available memory still need testing on the target device.
 
 ## Install once
 
-1. Keep `sprite3d_mesh_io-1.0.1.zip` zipped.
+1. Keep `sprite3d_mesh_io-1.1.0.zip` zipped.
 2. Open Blender 5: **Edit → Preferences → Get Extensions**.
 3. Open the top-right drop-down menu and choose **Install from Disk…**.
 4. Select the ZIP and install it. Enable **Sprite3D Mesh Import Export** if it
@@ -174,6 +174,47 @@ A larger, optional actual-Blender integration script is included:
     blender --background --factory-startup --python-exit-code 1 --python /absolute/path/to/tests/run_in_blender.py
 
 The normal add-on workflow does not require either command.
+
+## Export directional billboards
+
+Select the model meshes, then use **N → Sprite3D → Export Billboard** or
+**File → Export → Picoware Billboard**. This bakes the current evaluated frame;
+it does not export animation yet. Choose 1, 4 or 8 views and 32, 64, 96 or 128
+pixels per square view. Set **Model Forward** to the direction the model faces
+in Blender's XY ground plane (the example dragon faces -X).
+
+The chosen `.billboard` name creates a new folder without that suffix.
+Existing folders are refused to prevent accidental replacement. The folder
+contains PNG previews, raw RGB332 pixels, MSB-first transparency masks,
+`billboard.json`, and `load_billboard.py`. All views share orthographic framing;
+the bottom includes 3% ground clearance. View zero looks at the front, then
+camera azimuth increases counterclockwise around Blender +Z. No mesh triangle
+limit applies to baking: only the resulting image resolution matters at runtime.
+Temporary scenes and evaluated meshes are cleaned up; source objects are not edited.
+The bake uses camera-relative studio lighting, not the source scene lighting.
+
+Copy the whole output folder to the device SD card. From the generated loader:
+
+```python
+from load_billboard import load_billboard
+asset, height = load_billboard("/sd/dragon")
+entity.set_billboard(asset, height)
+```
+
+Put the folder on `sys.path` or import its loader from your application's package.
+The loader uses `picoware.engine.image.Image`, not the GUI Image class.
+The entity direction defines its front in engine world space; Model Forward
+defines which side of the Blender model is baked as the front.
+You may pass a smaller world height to display the dragon at a different scale.
+The renderer chooses an image from camera angle relative to the entity direction.
+
+Eight 64x64 views contain **36,864 bytes (36 KiB)** of pixel and mask payload.
+This excludes native objects, metadata and temporary loading copies. Lower
+resolution reduces memory; billboards also trade true 3D geometry for discrete
+views. The example dragon passed 17 complete framebuffer comparisons in the
+native desktop simulator (eight directions at two sizes, transparency and
+behind-camera rejection). Device memory, performance and rendering have not
+been tested. Mesh export remains available independently.
 
 ## Files and license
 

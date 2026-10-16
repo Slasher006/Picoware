@@ -15,6 +15,7 @@ from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatPrope
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 from . import codec
+from .billboard import SPRITE3D_OT_export_billboard
 
 ATTR_COLOR = 's3d_color565'
 ATTR_EXTRA = 's3d_extra16'
@@ -608,6 +609,7 @@ class SPRITE3D_PT_tools(bpy.types.Panel):
                         box.prop(socket, 'default_value', text='Face Color')
             box.label(text='Picoware RGB565 triangle colors', icon='INFO')
         layout.separator()
+        layout.operator('export_scene.picoware_billboard', text='Export Billboard', icon='RENDER_STILL')
         layout.operator('sprite3d.self_test', icon='CHECKMARK')
 
 
@@ -617,9 +619,10 @@ def _menu_import(self, context):
 
 def _menu_export(self, context):
     self.layout.operator(SPRITE3D_OT_export.bl_idname, text='Sprite3D Mesh (.sprite3d)')
+    self.layout.operator(SPRITE3D_OT_export_billboard.bl_idname, text='Picoware Billboard (.billboard)')
 
 
-CLASSES = (SPRITE3D_OT_import, SPRITE3D_OT_export, SPRITE3D_OT_save_source,
+CLASSES = (SPRITE3D_OT_import, SPRITE3D_OT_export, SPRITE3D_OT_export_billboard, SPRITE3D_OT_save_source,
            SPRITE3D_OT_self_test, SPRITE3D_PT_tools)
 
 
