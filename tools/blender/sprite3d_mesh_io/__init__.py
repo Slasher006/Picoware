@@ -15,7 +15,7 @@ from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatPrope
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 from . import codec
-from .billboard import SPRITE3D_OT_export_billboard
+from .billboard import SPRITE3D_OT_export_billboard, SPRITE3D_OT_preview_billboard, SPRITE3D_OT_stop_preview, stop_preview
 
 ATTR_COLOR = 's3d_color565'
 ATTR_EXTRA = 's3d_extra16'
@@ -610,6 +610,10 @@ class SPRITE3D_PT_tools(bpy.types.Panel):
             box.label(text='Picoware RGB565 triangle colors', icon='INFO')
         layout.separator()
         layout.operator('export_scene.picoware_billboard', text='Export Billboard', icon='RENDER_STILL')
+        animated = layout.operator('export_scene.picoware_billboard', text='Export Animated Billboard', icon='RENDER_ANIMATION')
+        animated.animated = True
+        layout.operator('sprite3d.stop_billboard_preview',text='Stop Preview',icon='PAUSE')
+        layout.label(text='Animate on timeline, select meshes, then export')
         layout.operator('sprite3d.self_test', icon='CHECKMARK')
 
 
@@ -620,9 +624,11 @@ def _menu_import(self, context):
 def _menu_export(self, context):
     self.layout.operator(SPRITE3D_OT_export.bl_idname, text='Sprite3D Mesh (.sprite3d)')
     self.layout.operator(SPRITE3D_OT_export_billboard.bl_idname, text='Picoware Billboard (.billboard)')
+    animated = self.layout.operator(SPRITE3D_OT_export_billboard.bl_idname, text='Picoware Animated Billboard (.billboard)')
+    animated.animated = True
 
 
-CLASSES = (SPRITE3D_OT_import, SPRITE3D_OT_export, SPRITE3D_OT_export_billboard, SPRITE3D_OT_save_source,
+CLASSES = (SPRITE3D_OT_stop_preview, SPRITE3D_OT_preview_billboard, SPRITE3D_OT_import, SPRITE3D_OT_export, SPRITE3D_OT_export_billboard, SPRITE3D_OT_save_source,
            SPRITE3D_OT_self_test, SPRITE3D_PT_tools)
 
 
@@ -634,6 +640,7 @@ def register():
 
 
 def unregister():
+    stop_preview()
     bpy.types.TOPBAR_MT_file_export.remove(_menu_export)
     bpy.types.TOPBAR_MT_file_import.remove(_menu_import)
     for cls in reversed(CLASSES):

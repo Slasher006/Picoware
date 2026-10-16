@@ -1,6 +1,6 @@
 # Sprite3D Mesh Import Export — Blender 5
 
-Version 1.1.0 · Picoware Sprite3D mesh import/export.
+Version 1.2.0 · Picoware Sprite3D mesh import/export.
 
 The codec and Blender integration suites run against Blender 5.3.0 Alpha.
 They check byte-exact round-trips, materials, transforms, triangulation,
@@ -9,7 +9,7 @@ rendering and available memory still need testing on the target device.
 
 ## Install once
 
-1. Keep `sprite3d_mesh_io-1.1.0.zip` zipped.
+1. Keep `sprite3d_mesh_io-1.2.0.zip` zipped.
 2. Open Blender 5: **Edit → Preferences → Get Extensions**.
 3. Open the top-right drop-down menu and choose **Install from Disk…**.
 4. Select the ZIP and install it. Enable **Sprite3D Mesh Import Export** if it
@@ -178,10 +178,10 @@ The normal add-on workflow does not require either command.
 ## Export directional billboards
 
 Select the model meshes, then use **N → Sprite3D → Export Billboard** or
-**File → Export → Picoware Billboard**. This bakes the current evaluated frame;
-it does not export animation yet. Choose 1, 4 or 8 views and 32, 64, 96 or 128
-pixels per square view. Set **Model Forward** to the direction the model faces
-in Blender's XY ground plane (the example dragon faces -X).
+**File → Export → Picoware Billboard**. Static export bakes the current evaluated frame. Defaults are eight views
+at 64x64 pixels. Under **Advanced**, choose 1, 4 or 8 views and 32, 64, 96 or 128
+pixels per square view. **Model Forward** is the direction the model faces
+in Blender's XY ground plane (the example dragon presets -X).
 
 The chosen `.billboard` name creates a new folder without that suffix.
 Existing folders are refused to prevent accidental replacement. The folder
@@ -215,6 +215,64 @@ views. The example dragon passed 17 complete framebuffer comparisons in the
 native desktop simulator (eight directions at two sizes, transparency and
 behind-camera rejection). Device memory, performance and rendering have not
 been tested. Mesh export remains available independently.
+
+## Animate and export — normal workflow
+
+1. Animate your model with ordinary Blender keyframes. Set the timeline start
+   and end to the clip you want. For a loop, the last frame should match the first.
+2. Select the model meshes (selecting all is fine; cameras and lights are ignored).
+3. Choose **N → Sprite3D → Export Animated Billboard**, choose a new output name,
+   and export. The defaults use the timeline range and speed, four poses, eight
+   views and 64x64 pixels. No Python is needed to author or export the animation.
+
+**Preview Sampled Poses** shows exactly the poses that will be exported.
+Click **Stop Preview** to return to the original timeline frame.
+The preview also stops automatically for non-looping animations. Stop normal
+Blender timeline playback before using this preview.
+
+The export dialog shows payload memory before baking: the default animated
+asset uses **144 KiB**, excluding object overhead and loading copies.
+**Advanced** holds resolution, direction count, model-forward axis and manual
+frame/rate settings. Change **Exported Poses** from 1 to 8 for the current engine.
+
+Loop export excludes the repeated closing frame: range 1–13 with four poses
+samples frames 1, 4, 7 and 10. At a 24 FPS timeline, that becomes eight poses per
+second and a half-second loop. Non-looping export includes both endpoints.
+Fractional sample frames are supported. The exporter evaluates mesh modifiers
+and armatures at every sample; all frames and directions share the same framing.
+Do not use uncached simulations that depend on sequential playback as a source.
+Timeline position is restored after successful or failed baking. Output folders
+are only published after the whole bake succeeds.
+
+### Editable dragon example
+
+Open `emerald-dragon-animated.blend` and press Space to play. The separate
+**Dragon — Wing Flap Example** scene contains **Wing Flap L**, **Wing Flap R**
+and **Tail Sway** arrow controls, parented at the joints. Select a control to
+edit its rotation keyframes in the timeline or Dope Sheet. The static dragon
+scene is retained. The example is an object-parent rig, not a skeletal armature.
+Select the mesh parts again before exporting.
+
+### Play it in Picoware
+
+The generated loader keeps `load_billboard()` for static use and adds:
+
+```python
+from load_billboard import load_animation
+asset, animation = load_animation("/sd/dragon", entity, world_height=2.0)
+# In your existing game update, using elapsed time in seconds:
+animation.update(dt_seconds)
+```
+
+Keep `asset` and `animation` alive with the entity. The helper uses exported
+pose count, speed and loop settings. It advances the pose; the engine chooses
+the viewing direction automatically. One-shot playback holds its final pose;
+`animation.reset()` restarts it. A delayed update advances to the correct pose
+instead of slowing the clip. No extra timer or background thread is created.
+
+The animated dragon passed 64 full-frame native simulator comparisons (eight
+directions, four poses, two display sizes), plus looping, skipped-update,
+one-shot and reset checks. Device memory and performance remain untested.
 
 ## Files and license
 
