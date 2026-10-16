@@ -1,17 +1,15 @@
 # Sprite3D Mesh Import Export — Blender 5
 
-Version 1.0.0 · Custom extension for the supplied `knight.sprite3d` layout.
+Version 1.0.1 · Picoware Sprite3D mesh import/export.
 
-**Verification status:** The pure-Python codec passed 25 automated tests,
-including exact binary round-trip of the knight and all 65,536 RGB565 values.
-Blender 5 itself was not available in the build environment. Installation, UI,
-and actual Blender mesh integration have **not** been runtime-verified here.
-A **Run Self-Test** button is included so those checks can run in your Blender.
-See `TEST_REPORT.md` for the precise test boundary.
+The codec and Blender integration suites run against Blender 5.3.0 Alpha.
+They check byte-exact round-trips, materials, transforms, triangulation,
+backup behavior and Picoware validation limits. These are host checks;
+rendering and available memory still need testing on the target device.
 
 ## Install once
 
-1. Keep `sprite3d_mesh_io-1.0.0.zip` zipped.
+1. Keep `sprite3d_mesh_io-1.0.1.zip` zipped.
 2. Open Blender 5: **Edit → Preferences → Get Extensions**.
 3. Open the top-right drop-down menu and choose **Install from Disk…**.
 4. Select the ZIP and install it. Enable **Sprite3D Mesh Import Export** if it
@@ -72,7 +70,7 @@ single-user material copy for an independent color.
 The exporter's **Colors / Data** modes are:
 
 - **Material Colors / Keep Extra Data** (default): export flat material colors
-  as RGB565 while retaining the unknown upper 16 bits per original face.
+  as RGB565 while retaining the wireframe byte and padding byte per original face.
   A face with no material retains its original color; a completely new face
   without a material becomes white and produces a warning.
 - **Preserve Original Face Data**: ignore material edits and assignments.
@@ -82,11 +80,8 @@ The exporter's **Colors / Data** modes are:
 - **Require Material Colors**: every face must have a supported material.
   Missing materials are errors rather than fallback colors.
 
-**Color interpretation is inferred, not exporter-confirmed.** The first uint16
-looks like RGB565, but the original application's exporter/loader was not
-identified. Unedited colors round-trip numerically; correct appearance and
-meaning in the original engine still need checking. Choose **Preserve Original
-Face Data** for conservative geometry-only editing.
+Colors are RGB565, matching the current Picoware game engine.
+Choose **Preserve Original Face Data** for geometry-only editing.
 
 A supported node material uses a Principled BSDF connected to Material Output,
 with an unlinked, solid Base Color. Linked textures/procedural colors or mixed
@@ -119,36 +114,40 @@ permanently triangulated. Nonplanar polygons use Blender's tessellation. Exact
 byte identity is not promised after geometry/topology edits, arbitrary scales,
 modifier evaluation, or Blender operations that reorder vertices/triangles.
 
-Unknown per-face data is kept in integer FACE attributes. Topology-changing
-operations may copy, interpolate or discard attributes. New faces that lack
-valid attributes use their assigned imported material's extra data; otherwise
-**New Face Extra Data** defaults to **1**, the value found in the knight.
-A warning identifies triangles without original face data. That fallback is
-not evidence that `1` is appropriate for a different engine or asset format.
-For especially sensitive edits, re-import the edited result and check it in
-the original application before replacing production assets.
+Wireframe and padding are kept in integer FACE attributes compatible with
+existing Blender projects. Topology changes may copy or discard those attributes.
+New faces use their assigned imported material's metadata when available;
+otherwise **New Face Wireframe** controls the outline flag (on by default),
+and padding is zero. Imported padding bytes are preserved exactly. Invalid
+wireframe flags are rejected instead of silently normalized.
 
-The implementation has a safety limit of 250,000 triangles per file. This is
-an add-on limit, not a claim about the target engine's memory/triangle budget.
+Import and export accept at most **4,096 triangles**, matching this Picoware
+build's `ENGINE_MAX_TRIANGLES_PER_SPRITE`. Export counts evaluated, triangulated
+geometry across all selected meshes. Other engine builds may have lower limits.
+Coordinates must be finite and within **+/-1e12**, matching the Picoware editor.
+Validation completes before an existing output is replaced or backed up.
+
 Loose edges and isolated vertices are not representable in this triangle-only
 format and are not exported. Degenerate input triangles are kept.
 
 ## What file format is supported?
 
-Only the specific headerless binary layout found in your upload:
+The current Picoware engine uses this headerless binary layout:
 
 | Offset in each 40-byte record | Contents |
 | --- | --- |
 | 0–35 | Nine little-endian float32 numbers: three XYZ vertices |
-| 36–37 | A uint16, interpreted as RGB565 for material preview/editing |
-| 38–39 | An opaque uint16; preserved, not treated as padding |
+| 36–37 | RGB565 uint16 color |
+| 38 | Wireframe flag: 0 or 1 |
+| 39 | Preserved alignment padding byte |
 
 There is no header, index buffer, skeleton, material table, UV data, object
 hierarchy or animation block in this supported layout. This is **not** a
 universal Godot `.tscn`/`.tres` importer or a reader for every unrelated format
 named `.sprite3d`. A coincidental size divisible by 40 is not proof that an
 unfamiliar file has this format; the importer can only validate the structural
-layout and finite coordinates, not recognize a missing magic signature.
+layout, flags, coordinate bounds and triangle count, not recognize a missing magic signature.
+Legacy 52-byte records are not supported; convert them with the Picoware editor first.
 
 Source sample: 8,960 bytes, 224 triangle records, 155 exact vertex positions,
 36 different per-face metadata pairs; all sample extra uint16 values are 1.
@@ -181,8 +180,7 @@ The normal add-on workflow does not require either command.
 `__init__.py` contains the Blender integration and UI. `codec.py` is the
 standalone binary codec. `blender_manifest.toml` describes the extension.
 `tests/` includes codec tests, an actual-Blender integration script, and the
-unchanged sample knight as a local test fixture. `TEST_REPORT.md` records what
-was actually verified during creation.
+unchanged sample knight as a local test fixture used by the built-in self-test.
 
 The add-on code is supplied under GPL-3.0-or-later; see `LICENSE`. The bundled
 `tests/fixtures/knight.sprite3d` is the user's supplied asset, included only for

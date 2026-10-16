@@ -87,20 +87,45 @@ class CodecTests(unittest.TestCase):
         self.assertEqual(c.linear_to_rgb565((1, 1, 1)), 0xFFFF)
         self.assertEqual(c.linear_to_rgb565((0, 0, 0)), 0)
 
-    def test_extra_data_full_uint16_range(self):
+    def test_wireframe_and_padding_roundtrip(self):
         t = self.triangles[0]
-        for extra in (0, 1, 255, 32768, 65535):
+        for extra in (0, 1, 256, 32768, 65281):
             data = c.encode([c.Triangle(t.coordinates, 65535, extra)])
             self.assertEqual(data[-4:], struct.pack('<HH', 65535, extra))
             self.assertEqual(c.decode(data)[0].extra, extra)
 
+    def test_invalid_wireframe_rejected_on_read_and_write(self):
+        t = self.triangles[0]
+        for extra in (2, 255, 65535):
+            with self.assertRaisesRegex(c.FormatError, 'wireframe'):
+                c.encode([c.Triangle(t.coordinates, t.color, extra)])
+            with self.assertRaisesRegex(c.FormatError, 'wireframe'):
+                c.decode(c.RECORD.pack(*t.coordinates, t.color, extra))
+
+    def test_coordinate_bounds(self):
+        for value in (-1e12, 1e12):
+            self.assertEqual(len(c.decode(c.encode([c.Triangle((value,) * 9, 1, 0)]))), 1)
+        for value in (-1e13, 1e13):
+            with self.assertRaisesRegex(c.FormatError, 'coordinates'):
+                c.encode([c.Triangle((value,) * 9, 1, 0)])
+            with self.assertRaisesRegex(c.FormatError, 'coordinates'):
+                c.decode(c.RECORD.pack(*((value,) * 9), 1, 0))
+
+    def test_picoware_triangle_boundary(self):
+        t = self.triangles[0]
+        self.assertEqual(len(c.decode(c.encode([t] * 4096))), 4096)
+        with self.assertRaises(c.FormatError):
+            c.encode([t] * 4097)
+        with self.assertRaises(c.FormatError):
+            c.decode(self.raw[:40] * 4097)
+
     def test_degenerate_triangle_does_not_repeat_indices(self):
-        t = c.Triangle((0., 0., 0.) * 3, 1, 65535)
+        t = c.Triangle((0., 0., 0.) * 3, 1, 65281)
         vertices, faces = c.build_mesh_arrays([t])
         self.assertEqual(len(set(faces[0])), 3)
         self.assertEqual(len(vertices), 3)
         xyz = tuple(v for i in faces[0] for v in c.blender_to_source(vertices[i]))
-        self.assertEqual(c.encode([c.Triangle(xyz, 1, 65535)]), c.encode([t]))
+        self.assertEqual(c.encode([c.Triangle(xyz, 1, 65281)]), c.encode([t]))
 
     def test_empty_and_truncated_files_rejected(self):
         for data in (b'', b'x', self.raw[:-1], self.raw + b'header'):

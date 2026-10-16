@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Codec for the specific headerless triangle layout found in knight.sprite3d.
+"""Picoware headerless 40-byte Sprite3D triangle codec.
 
-Each record: 9 little-endian float32 coordinates, 2 opaque little-endian uint16s.
-The first uint16 is *interpreted* as RGB565 when color editing is requested.
-The meaning of the second uint16 is unknown. It must not be treated as padding.
-This is not a general Godot scene/resource loader. No third-party dependencies.
+Records contain nine little-endian float32 coordinates, RGB565 uint16,
+a wireframe byte (0 or 1), and one preserved padding byte. ``extra`` retains
+the last two bytes together for compatibility with existing Blender files.
+No third-party dependencies.
 """
 from __future__ import annotations
 
@@ -20,7 +20,8 @@ from typing import Iterable
 
 RECORD = struct.Struct('<9fHH')
 VERTEX = struct.Struct('<3f')
-MAX_TRIANGLES = 250_000
+MAX_TRIANGLES = 4096  # Picoware engine_config.hpp; smaller builds may differ.
+MAX_COORDINATE = 1e12
 MAX_BYTES = MAX_TRIANGLES * RECORD.size
 
 
@@ -48,6 +49,10 @@ def decode(data: bytes) -> list[Triangle]:
     for index, values in enumerate(RECORD.iter_unpack(data), 1):
         if not all(math.isfinite(v) for v in values[:9]):
             raise FormatError(f'Triangle {index} has a non-finite coordinate; wrong format?')
+        if any(abs(v) > MAX_COORDINATE for v in values[:9]):
+            raise FormatError(f'Triangle {index}: coordinates must be within +/-1e12.')
+        if values[10] & 0xFF not in (0, 1):
+            raise FormatError(f'Triangle {index}: wireframe flag must be 0 or 1.')
         result.append(Triangle(values[:9], values[9], values[10]))
     return result
 
@@ -66,9 +71,13 @@ def encode(triangles: Iterable[Triangle]) -> bytes:
         coords = triangle.coordinates
         if len(coords) != 9 or not all(math.isfinite(v) for v in coords):
             raise FormatError(f'Triangle {index} needs nine finite coordinates.')
+        if any(abs(v) > MAX_COORDINATE for v in coords):
+            raise FormatError(f'Triangle {index}: coordinates must be within +/-1e12.')
         for label, value in (('color', triangle.color), ('extra data', triangle.extra)):
             if not isinstance(value, int) or not 0 <= value <= 0xFFFF:
                 raise FormatError(f'Triangle {index}: {label} must be an integer from 0 to 65535.')
+        if triangle.extra & 0xFF not in (0, 1):
+            raise FormatError(f'Triangle {index}: wireframe flag must be 0 or 1.')
         try:
             output.extend(RECORD.pack(*coords, triangle.color, triangle.extra))
         except (OverflowError, struct.error) as exc:

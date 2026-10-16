@@ -11,7 +11,7 @@ import re
 import traceback
 
 import bpy
-from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 from . import codec
@@ -35,9 +35,9 @@ AXES_EXPORT = (
     ('AUTO', 'Automatic / Match Import', 'Use each object\'s saved import axes and undo its import scale; new meshes use source Y Up'),
 ) + AXES_IMPORT
 COLOR_MODES = (
-    ('AUTO', 'Material Colors / Keep Extra Data', 'Read flat Principled Base Color as RGB565; preserve unknown extra bits per face; missing materials retain original data'),
+    ('AUTO', 'Material Colors / Keep Extra Data', 'Read flat Principled Base Color as RGB565; preserve wireframe and padding per face; missing materials retain original data'),
     ('PRESERVE', 'Preserve Original Face Data', 'Ignore material edits and assignments; preserve both original uint16 fields per face'),
-    ('MATERIAL', 'Require Material Colors', 'Every face must have a supported flat-color material; preserve unknown extra bits per face'),
+    ('MATERIAL', 'Require Material Colors', 'Every face must have a supported flat-color material; preserve wireframe and padding per face'),
 )
 
 
@@ -120,7 +120,7 @@ def _new_material(color, extra):
     shader.location = (-240, 0)
     material[MAT_COLOR] = color
     material[MAT_EXTRA] = extra
-    material['sprite3d_color_note'] = 'Low uint16 interpreted as RGB565; extra uint16 meaning unknown'
+    material['sprite3d_color_note'] = 'RGB565 color; extra low byte is wireframe, high byte is preserved padding'
     return material
 
 
@@ -298,7 +298,7 @@ def collect_triangles(context, objects, *, apply_modifiers=True, apply_transform
             if no_metadata:
                 warnings.add(
                     f'{obj.name}: {no_metadata} triangles lack original face data; '
-                    'extra bits use imported material data or the New Face Extra Data setting')
+                    'wireframe and padding use imported material data or the New Face Wireframe setting')
         finally:
             if evaluated is not None:
                 evaluated.to_mesh_clear()
@@ -400,8 +400,8 @@ class SPRITE3D_OT_export(bpy.types.Operator, ExportHelper):
     axes: EnumProperty(name='File Coordinates', items=AXES_EXPORT, default='AUTO')
     export_scale: FloatProperty(name='Additional Export Scale', default=1.0, min=0.000001, max=1000000.0)
     color_mode: EnumProperty(name='Colors / Data', items=COLOR_MODES, default='AUTO')
-    default_extra: IntProperty(name='New Face Extra Data', default=1, min=0, max=65535,
-                              description='Fallback for new faces lacking imported data; meaning unknown. The knight file uses 1')
+    default_wireframe: BoolProperty(name='New Face Wireframe', default=True,
+                                    description='Draw outlines on new faces without imported data; padding is zero')
     fix_mirrors: BoolProperty(name='Correct Mirrored Winding', default=True,
                              description='Reverse winding when an applied object transform has a negative determinant')
     backup: BoolProperty(name='Back Up Existing File', default=True,
@@ -426,10 +426,10 @@ class SPRITE3D_OT_export(bpy.types.Operator, ExportHelper):
         layout.prop(self, 'axes')
         layout.prop(self, 'export_scale')
         layout.prop(self, 'color_mode')
-        layout.prop(self, 'default_extra')
+        layout.prop(self, 'default_wireframe')
         layout.prop(self, 'fix_mirrors')
         layout.prop(self, 'backup')
-        layout.label(text='Triangles generated automatically', icon='INFO')
+        layout.label(text=f'Picoware limit: {codec.MAX_TRIANGLES:,} triangles', icon='INFO')
         layout.label(text='No textures, rigs or animation data')
 
     def execute(self, context):
@@ -440,7 +440,7 @@ class SPRITE3D_OT_export(bpy.types.Operator, ExportHelper):
                 context, objects, self.filepath, backup=self.backup,
                 apply_modifiers=self.apply_modifiers, apply_transform=self.apply_transform,
                 axes=self.axes, export_scale=self.export_scale, color_mode=self.color_mode,
-                default_extra=self.default_extra, fix_mirrors=self.fix_mirrors)
+                default_extra=int(self.default_wireframe), fix_mirrors=self.fix_mirrors)
             _report_export(self, count, warnings, backup_path)
             return {'FINISHED'}
         except Exception as exc:
@@ -529,8 +529,8 @@ def run_self_test(context):
         shader.inputs['Base Color'].default_value = (0.0, 1.0, 0.0, 1.0)
         triangles, _ = collect_triangles(context, [obj], color_mode='AUTO')
         if triangles[0].color != 0x07E0 or any(t.extra != 1 for t in triangles):
-            raise AssertionError('Recolor or unknown-data preservation failed.')
-        checks.append('Renamed material recolors to green; unknown extra data preserved')
+            raise AssertionError('Recolor or wireframe/padding preservation failed.')
+        checks.append('Renamed material recolors to green; wireframe/padding preserved')
         obj.location.x = 0.25
         context.view_layer.update()
         triangles, _ = collect_triangles(context, [obj], color_mode='PRESERVE')
@@ -606,7 +606,7 @@ class SPRITE3D_PT_tools(bpy.types.Panel):
                     if socket is not None and not socket.is_linked:
                         box.label(text='Active Material: ' + material.name)
                         box.prop(socket, 'default_value', text='Face Color')
-            box.label(text='RGB565 colors are an interpretation', icon='INFO')
+            box.label(text='Picoware RGB565 triangle colors', icon='INFO')
         layout.separator()
         layout.operator('sprite3d.self_test', icon='CHECKMARK')
 
