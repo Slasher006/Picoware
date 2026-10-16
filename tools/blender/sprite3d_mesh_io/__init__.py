@@ -338,8 +338,8 @@ class SPRITE3D_OT_import(bpy.types.Operator, ImportHelper):
     bl_label = 'Import Sprite3D Mesh'
     bl_description = 'Import the headerless 40-byte-per-triangle layout used by knight.sprite3d'
     bl_options = {'REGISTER', 'UNDO'}
-    filename_ext = '.sprite3d'
-    filter_glob: StringProperty(default='*.sprite3d', options={'HIDDEN'})
+    filename_ext = '.bin'
+    filter_glob: StringProperty(default='*.bin;*.sprite3d', options={'HIDDEN'})
     files: CollectionProperty(type=bpy.types.OperatorFileListElement, options={'HIDDEN', 'SKIP_SAVE'})
     directory: StringProperty(subtype='DIR_PATH', options={'HIDDEN', 'SKIP_SAVE'})
     axes: EnumProperty(name='File Coordinates', items=AXES_IMPORT, default='Y_UP')
@@ -391,8 +391,8 @@ class SPRITE3D_OT_export(bpy.types.Operator, ExportHelper):
     bl_label = 'Export Sprite3D Mesh'
     bl_description = 'Export static geometry to the knight.sprite3d binary layout'
     bl_options = {'PRESET'}
-    filename_ext = '.sprite3d'
-    filter_glob: StringProperty(default='*.sprite3d', options={'HIDDEN'})
+    filename_ext = '.bin'
+    filter_glob: StringProperty(default='*.bin;*.sprite3d', options={'HIDDEN'})
     selected_only: BoolProperty(name='Selected Objects Only', default=True)
     apply_modifiers: BoolProperty(name='Apply Modifiers', default=True,
                                  description='Export the evaluated mesh at the current frame; the modifier stack is not changed')
@@ -408,15 +408,20 @@ class SPRITE3D_OT_export(bpy.types.Operator, ExportHelper):
     backup: BoolProperty(name='Back Up Existing File', default=True,
                          description='Make a unique timestamped .bak before replacing a file; failure stops the export')
 
+    def check(self, context):
+        if Path(self.filepath).suffix.lower() in ('.bin', '.sprite3d'):
+            return False
+        return ExportHelper.check(self, context)
+
     def invoke(self, context, event):
         if not self.filepath:
             obj = context.active_object
             source = obj.get(SOURCE_PATH) if obj is not None else None
             if source:
                 path = Path(source)
-                self.filepath = str(path.with_name(path.stem + '_edited.sprite3d'))
+                self.filepath = str(path.with_name(path.stem + '_edited.bin'))
             else:
-                self.filepath = bpy.path.clean_name(obj.name if obj else 'mesh') + '.sprite3d'
+                self.filepath = bpy.path.clean_name(obj.name if obj else 'mesh') + '.bin'
         return ExportHelper.invoke(self, context, event)
 
     def draw(self, context):
@@ -434,6 +439,7 @@ class SPRITE3D_OT_export(bpy.types.Operator, ExportHelper):
         layout.label(text='No textures, rigs or animation data')
 
     def execute(self, context):
+        self.check(context)
         objects = list(context.selected_objects) if self.selected_only else list(context.scene.objects)
         objects = sorted((obj for obj in objects if obj.type == 'MESH'), key=lambda obj: obj.name)
         try:
@@ -587,7 +593,7 @@ class SPRITE3D_PT_tools(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.operator('import_scene.sprite3d_mesh', text='Import .sprite3d', icon='IMPORT')
+        layout.operator('import_scene.sprite3d_mesh', text='Import Mesh (.bin / .sprite3d)', icon='IMPORT')
         op = layout.operator('export_scene.sprite3d_mesh', text='Export Selected...', icon='EXPORT')
         op.selected_only = True
         obj = context.active_object
@@ -618,13 +624,13 @@ class SPRITE3D_PT_tools(bpy.types.Panel):
 
 
 def _menu_import(self, context):
-    self.layout.operator(SPRITE3D_OT_import.bl_idname, text='Sprite3D Mesh (.sprite3d)')
+    self.layout.operator(SPRITE3D_OT_import.bl_idname, text='Sprite3D Mesh (.bin / .sprite3d)')
 
 
 def _menu_export(self, context):
-    self.layout.operator(SPRITE3D_OT_export.bl_idname, text='Sprite3D Mesh (.sprite3d)')
-    self.layout.operator(SPRITE3D_OT_export_billboard.bl_idname, text='Picoware Billboard (.billboard)')
-    animated = self.layout.operator(SPRITE3D_OT_export_billboard.bl_idname, text='Picoware Animated Billboard (.billboard)')
+    self.layout.operator(SPRITE3D_OT_export.bl_idname, text='Sprite3D Mesh (.bin / .sprite3d)')
+    self.layout.operator(SPRITE3D_OT_export_billboard.bl_idname, text='Picoware Billboard (.bin)')
+    animated = self.layout.operator(SPRITE3D_OT_export_billboard.bl_idname, text='Picoware Animated Billboard (.bin)')
     animated.animated = True
 
 

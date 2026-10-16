@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Run with Blender --background --factory-startup --python-exit-code 1."""
 import importlib.util
-import json
+import struct
 from pathlib import Path
 import sys
 import tempfile
@@ -21,7 +21,8 @@ for args in [(1,1,4),(10,1,4),(1,25,9),(1,25,0)]:
     except ValueError:pass
     else:raise AssertionError(args)
 assert b.payload_bytes(64,8,4)==147456
-loader={};exec(b.LOADER,loader)
+loader={}
+exec((root.parents[2]/'src/MicroPython/picoware/engine/billboard_asset.py').read_text(),loader)
 class Entity:billboard_pose=0
 entity=Entity();player=loader['BillboardAnimation'](entity,4,8,True)
 for dt,expected in [(0,0),(.125,1),(.25,3),(.125,0),(.875,3)]:
@@ -45,20 +46,34 @@ a.register()
 try:
     before=(len(bpy.data.objects),len(bpy.data.meshes),len(bpy.data.scenes),len(bpy.data.worlds))
     with tempfile.TemporaryDirectory() as directory:
-        output,info=b.bake(bpy.context,str(Path(directory)/'animated.billboard'),32,1,'NEG_X',True,1,5,2,8,False)
+        output,info=b.bake(bpy.context,str(Path(directory)/'animated.billboard'),8,1,'NEG_X',True,1,5,2,8,False)
         assert info['poses']==2 and info['sample_frames']==[1,5]
-        assert info['payload_bytes']==2304
+        assert info['payload_bytes']==144
         assert scene.frame_current==3 and abs(scene.frame_subframe-.25)<1e-6
         assert before==(len(bpy.data.objects),len(bpy.data.meshes),len(bpy.data.scenes),len(bpy.data.worlds))
-        assert json.loads((output/'billboard.json').read_text())['poses']==2
-        masks=[(output/v['mask']).read_bytes() for v in info['views']]
+        assert output.is_file() and list(Path(directory).iterdir())==[output]
+        data=output.read_bytes()
+        assert len(data)==24+144 and struct.unpack('<4sBBBBHHffI',data[:24])[:7]==(b'PWBB',1,1,2,0,8,8)
+        masks=[data[24+pose*72+64:24+(pose+1)*72] for pose in range(2)]
         assert masks[0]!=masks[1], 'Animated geometry was not evaluated per pose'
+        for unsupported in (32,64,96,128):
+            try:b.bake(bpy.context,str(Path(directory)/'oversized.bin'),unsupported,1,'NEG_X')
+            except ValueError:pass
+            else:raise AssertionError('New exports must use 8 or 16 pixels')
+        # Existing assets are preserved, and static exports use the same container.
+        try:b.bake(bpy.context,str(output),8,1,'NEG_X')
+        except ValueError:pass
+        else:raise AssertionError('Existing asset must not be overwritten')
+        assert output.read_bytes()==data
+        static,_=b.bake(bpy.context,str(Path(directory)/'static'),8,1,'NEG_X')
+        assert static.name=='static.bin' and static.is_file() and static.stat().st_size==24+72
+        assert struct.unpack('<4sBBBBHHffI',static.read_bytes()[:24])[3]==1
         # A failed render must clean temporary geometry/output and restore timeline.
         with patch.object(b,'pack_rgba',side_effect=RuntimeError('injected pixel conversion failure')):
-            try:b.bake(bpy.context,str(Path(directory)/'failure.billboard'),32,1,'NEG_X',True,1,5,2,8,False)
+            try:b.bake(bpy.context,str(Path(directory)/'failure.billboard'),8,1,'NEG_X',True,1,5,2,8,False)
             except RuntimeError as exc:assert 'injected' in str(exc)
             else:raise AssertionError('Expected failure')
-        assert not (Path(directory)/'failure').exists()
+        assert not (Path(directory)/'failure.billboard').exists()
         assert not list(Path(directory).glob('.billboard-*'))
         assert before==(len(bpy.data.objects),len(bpy.data.meshes),len(bpy.data.scenes),len(bpy.data.worlds))
         assert scene.frame_current==3 and abs(scene.frame_subframe-.25)<1e-6

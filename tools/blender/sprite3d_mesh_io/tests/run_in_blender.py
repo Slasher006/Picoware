@@ -35,7 +35,7 @@ try:
     assert pixels == bytes([255]) and mask == bytes([0x80])
     checks.append('Billboard RGB332 colors, alpha threshold, top-down rows and MSB mask packing')
     with tempfile.TemporaryDirectory(prefix='sprite3d_blender_test_') as directory:
-        output = Path(directory) / 'roundtrip.sprite3d'
+        output = Path(directory) / 'roundtrip.bin'
         status = bpy.ops.import_scene.sprite3d_mesh(filepath=str(fixture), material_preview=False)
         assert status == {'FINISHED'}, status
         obj = bpy.context.active_object
@@ -43,7 +43,20 @@ try:
         status = bpy.ops.export_scene.sprite3d_mesh(filepath=str(output), color_mode='PRESERVE')
         assert status == {'FINISHED'}, status
         assert output.read_bytes() == fixture.read_bytes()
-        checks.append('Registered import/export operators perform a byte-exact file round-trip')
+        legacy = Path(directory) / 'legacy.sprite3d'
+        assert bpy.ops.export_scene.sprite3d_mesh(filepath=str(legacy),color_mode='PRESERVE')=={'FINISHED'}
+        assert legacy.read_bytes()==output.read_bytes()
+        assert bpy.ops.import_scene.sprite3d_mesh(filepath=str(output),material_preview=False)=={'FINISHED'}
+        addon._dispose_object(bpy.context.active_object)
+        obj.select_set(True);bpy.context.view_layer.objects.active=obj
+        from types import SimpleNamespace
+        for cls, legacy_suffix in ((addon.SPRITE3D_OT_export,'.sprite3d'),(addon.SPRITE3D_OT_export_billboard,'.billboard')):
+            assert cls.filename_ext=='.bin'
+            for name,expected in (('asset','asset.bin'),('asset.bin','asset.bin'),('asset'+legacy_suffix,'asset'+legacy_suffix)):
+                test=SimpleNamespace(filepath=name,filename_ext=cls.filename_ext,check_extension=True)
+                cls.check(test,bpy.context)
+                assert test.filepath==expected,(name,test.filepath)
+        checks.append('Default .bin and legacy extensions preserve byte-exact mesh files and dialog names')
 
         # Export an already-existing target and verify that its previous bytes
         # remain in the timestamped backup created by the actual operator.

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Bake selected evaluated meshes into Picoware RGB332 billboard views."""
-import json
+import struct
 import math
 from pathlib import Path
 import shutil
@@ -51,9 +51,9 @@ def payload_bytes(resolution, directions, poses):
     return directions * poses * (resolution**2 + (resolution**2 + 7)//8)
 
 
-def bake(context, filepath, resolution=64, directions=8, forward='NEG_Y',
+def bake(context, filepath, resolution=8, directions=8, forward='NEG_Y',
          animated=False, frame_start=1, frame_end=25, poses=4, playback_fps=8.0, loop=True):
-    if resolution not in (32, 64, 96, 128) or directions not in (1, 4, 8):
+    if resolution not in (8, 16) or directions not in (1, 4, 8):
         raise ValueError('Unsupported billboard resolution or direction count')
     angles = {'POS_X': 0, 'POS_Y': math.pi / 2, 'NEG_X': math.pi, 'NEG_Y': -math.pi / 2}
     if forward not in angles:
@@ -66,9 +66,11 @@ def bake(context, filepath, resolution=64, directions=8, forward='NEG_Y',
     objects = [ob for ob in context.selected_objects if ob.type == 'MESH']
     if not objects:
         raise ValueError('Select the meshes to bake')
-    destination = Path(bpy.path.abspath(filepath)).with_suffix('')
+    destination = Path(bpy.path.abspath(filepath))
+    if destination.suffix.lower() not in ('.bin', '.billboard'):
+        destination = destination.with_suffix('.bin')
     if destination.exists():
-        raise ValueError('Output folder already exists; choose a new name')
+        raise ValueError('Output file already exists; choose a new name')
     if not destination.parent.is_dir():
         raise ValueError('Output parent directory does not exist')
     scene = None
@@ -116,7 +118,11 @@ def bake(context, filepath, resolution=64, directions=8, forward='NEG_Y',
         scene.render.resolution_percentage = 100
         scene.view_settings.view_transform = 'Standard'
         scene.render.image_settings.file_format = 'PNG'; scene.render.image_settings.color_mode = 'RGBA'
-        files = []
+        packed = temporary / 'asset.billboard'
+        with packed.open('wb') as stream:
+            stream.write(struct.pack('<4sBBBBHHffI', b'PWBB', 1, directions, len(frames),
+                                     int(bool(loop)), resolution, resolution, playback_fps, extent,
+                                     payload_bytes(resolution, directions, len(frames))))
         for pose, frame in enumerate(frames):
             set_sample_frame(source_scene, frame)
             context.view_layer.update()
@@ -147,9 +153,10 @@ def bake(context, filepath, resolution=64, directions=8, forward='NEG_Y',
                     bpy.data.images.remove(image)
                 if not any(mask):
                     raise ValueError('Rendered view is empty')
-                (temporary / (stem + '.rgb332')).write_bytes(pixels)
-                (temporary / (stem + '.mask')).write_bytes(mask)
-                files.append({'direction': direction, 'pose': pose, 'pixels': stem+'.rgb332', 'mask': stem+'.mask'})
+                with packed.open('ab') as stream:
+                    stream.write(pixels)
+                    stream.write(mask)
+                Path(scene.render.filepath).unlink()
             for clone in clones:
                 mesh = clone.data
                 bpy.data.objects.remove(clone, do_unlink=True)
@@ -161,10 +168,8 @@ def bake(context, filepath, resolution=64, directions=8, forward='NEG_Y',
                     'view_order': 'camera azimuth increases counterclockwise around Blender +Z from forward axis',
                     'world_height': extent, 'ground_padding_fraction': .03,
                     'mask_order': 'row-major top-down, MSB-first, no row padding',
-                    'payload_bytes': payload_bytes(resolution, directions, len(frames)), 'views': files}
-        (temporary / 'billboard.json').write_text(json.dumps(metadata, indent=2)+'\n')
-        (temporary / 'load_billboard.py').write_text(LOADER)
-        temporary.rename(destination)
+                    'payload_bytes': payload_bytes(resolution, directions, len(frames))}
+        packed.rename(destination)
         return destination, metadata
     finally:
         if scene is not None:
@@ -177,72 +182,6 @@ def bake(context, filepath, resolution=64, directions=8, forward='NEG_Y',
                 if item.users == 0: collection.remove(item)
         if temporary.exists(): shutil.rmtree(temporary)
         set_sample_frame(source_scene, original_frame)
-
-
-LOADER = '''"""Load adjacent exported files on Picoware. Attach with entity.set_billboard(asset, height)."""
-def load_billboard(directory):
-    import json
-    from picoware.engine.billboard import Billboard
-    from picoware.engine.image import Image
-    from picoware.system.vector import Vector
-    with open(directory + '/billboard.json') as stream:
-        info = json.load(stream)
-    result = Billboard(info['directions'], info['poses'])
-    for view in info['views']:
-        with open(directory + '/' + view['pixels'], 'rb') as stream:
-            pixels = stream.read()
-        with open(directory + '/' + view['mask'], 'rb') as stream:
-            mask = stream.read()
-        image = Image(Vector(info['width'], info['height']), True, pixels, None, mask)
-        result.set_direction_pose(view['direction'], view['pose'], image)
-        del image, pixels, mask
-    return result, info['world_height']
-
-class BillboardAnimation:
-    """Call update(dt_seconds) once per game update. No timer or background task."""
-    def __init__(self, entity, poses, fps=8.0, loop=True):
-        import math
-        if not 1 <= poses <= 8 or not math.isfinite(fps) or not 0 < fps <= 60:
-            raise ValueError('Invalid pose count or playback rate')
-        self.entity = entity
-        self.poses = poses
-        self.fps = fps
-        self.loop = loop
-        self.elapsed = 0.0
-        self.finished = False
-        entity.billboard_pose = 0
-
-    def reset(self):
-        self.elapsed = 0.0
-        self.finished = False
-        self.entity.billboard_pose = 0
-
-    def update(self, dt_seconds):
-        import math
-        if not math.isfinite(dt_seconds) or dt_seconds < 0:
-            raise ValueError('Elapsed time must be finite and non-negative')
-        if self.finished:
-            return
-        duration = self.poses / self.fps
-        self.elapsed += dt_seconds
-        if self.loop:
-            self.elapsed %= duration
-        elif self.elapsed >= duration:
-            self.elapsed = duration
-            self.finished = True
-        self.entity.billboard_pose = min(self.poses-1, int(self.elapsed * self.fps))
-
-
-def load_animation(directory, entity, world_height=None):
-    import json
-    asset, height = load_billboard(directory)
-    with open(directory + '/billboard.json') as stream:
-        info = json.load(stream)
-    entity.set_billboard(asset, height if world_height is None else world_height)
-    player = BillboardAnimation(entity, info['poses'], info.get('playback_fps',8.0), info.get('loop',True))
-    return asset, player
-
-'''
 
 
 _preview_state = None
@@ -320,10 +259,10 @@ class SPRITE3D_OT_preview_billboard(bpy.types.Operator):
 class SPRITE3D_OT_export_billboard(bpy.types.Operator, ExportHelper):
     bl_idname = 'export_scene.picoware_billboard'
     bl_label = 'Export Picoware Billboard'
-    bl_description = 'Bake selected meshes into static or animated directional RGB332 images and masks'
-    filename_ext = '.billboard'
-    filter_glob: StringProperty(default='*.billboard', options={'HIDDEN'})
-    resolution: EnumProperty(name='Resolution', items=[(str(n),str(n)+' x '+str(n),'') for n in (32,64,96,128)], default='64')
+    bl_description = 'Bake selected meshes into one static or animated .bin asset'
+    filename_ext = '.bin'
+    filter_glob: StringProperty(default='*.bin;*.billboard', options={'HIDDEN'})
+    resolution: EnumProperty(name='Resolution', items=[(str(n),str(n)+' x '+str(n),'') for n in (8,16)], default='8')
     directions: EnumProperty(name='Views', items=[(str(n),str(n),'') for n in (1,4,8)], default='8')
     forward: EnumProperty(name='Model Forward', items=[('POS_X','+X',''),('NEG_X','-X',''),('POS_Y','+Y',''),('NEG_Y','-Y','')], default='NEG_Y')
     animated: BoolProperty(name='Animated', default=False)
@@ -347,6 +286,11 @@ class SPRITE3D_OT_export_billboard(bpy.types.Operator, ExportHelper):
                 raise ValueError('Timeline speed is outside 0.1–60 poses/sec; adjust range or use Advanced timing')
             return start,end,rate
         return self.frame_start,self.frame_end,self.playback_fps
+
+    def check(self, context):
+        if Path(self.filepath).suffix.lower() in ('.bin', '.billboard'):
+            return False
+        return ExportHelper.check(self, context)
 
     def invoke(self, context, event):
         if not self.properties.is_property_set('frame_start'):
@@ -376,7 +320,9 @@ class SPRITE3D_OT_export_billboard(bpy.types.Operator, ExportHelper):
             layout.label(text='For loops, end with the same pose you started with')
         count = self.poses if self.animated else 1
         size = payload_bytes(int(self.resolution),int(self.directions),count)
+        layout.label(text='Single .bin asset file')
         layout.label(text='Image + mask payload: %.1f KiB' % (size/1024))
+        layout.label(text='8 x 8 recommended; 16 x 16 maximum')
         layout.prop(self,'advanced',icon='PREFERENCES')
         if self.advanced:
             for name in ('resolution','directions','forward'):

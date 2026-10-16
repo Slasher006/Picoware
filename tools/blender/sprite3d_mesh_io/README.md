@@ -1,6 +1,6 @@
 # Sprite3D Mesh Import Export — Blender 5
 
-Version 1.2.0 · Picoware Sprite3D mesh import/export.
+Version 1.3.3 · Picoware Sprite3D mesh import/export.
 
 The codec and Blender integration suites run against Blender 5.3.0 Alpha.
 They check byte-exact round-trips, materials, transforms, triangulation,
@@ -9,7 +9,7 @@ rendering and available memory still need testing on the target device.
 
 ## Install once
 
-1. Keep `sprite3d_mesh_io-1.2.0.zip` zipped.
+1. Keep `sprite3d_mesh_io-1.3.3.zip` zipped.
 2. Open Blender 5: **Edit → Preferences → Get Extensions**.
 3. Open the top-right drop-down menu and choose **Install from Disk…**.
 4. Select the ZIP and install it. Enable **Sprite3D Mesh Import Export** if it
@@ -19,10 +19,20 @@ rendering and available memory still need testing on the target device.
 No separate Python installation, command-line converter, OBJ file, internet
 connection, paid service, or external Python dependency is required to use it.
 
+## File names and compatibility
+
+`.bin` is the default extension for both mesh and billboard exports. Mesh import
+also accepts `.sprite3d`. Explicitly chosen `.sprite3d` mesh export names and
+`.billboard` billboard export names are retained for compatibility; Save Back to
+Source preserves the imported filename. The packed billboard loader accepts
+both `.bin` and `.billboard` (it validates the header, not the extension).
+The binary formats are unchanged. Choose the mesh importer for mesh files;
+packed billboards are loaded by `picoware.engine.billboard_asset` in the game.
+
 ## Import, edit, export
 
-**File → Import → Sprite3D Mesh (.sprite3d)** opens your original file directly.
-The same command is available in **N → Sprite3D → Import .sprite3d**.
+**File → Import → Sprite3D Mesh (.bin / .sprite3d)** opens your original file directly.
+The same command is available in **N → Sprite3D → Import Mesh**.
 Choose `knight.sprite3d` and leave the defaults for this sample.
 
 Edit the resulting mesh normally in Blender. The default import converts the
@@ -32,11 +42,11 @@ viewport to Material Preview. Disable **Merge Exact Duplicate Positions** if
 surfaces that merely touch should remain independent. Disable **Show Material
 Colors** to avoid changing viewport shading.
 
-**File → Export → Sprite3D Mesh (.sprite3d)** writes the file directly. It
+**File → Export → Sprite3D Mesh (.bin / .sprite3d)** writes the file directly. It
 exports selected mesh objects by default, triangulates automatically, includes
 modifiers and object transforms, and reverses the saved import-axis conversion.
 The sidebar has an **Export Selected…** button for the same operation.
-The first suggested output is `knight_edited.sprite3d`, not your original.
+The first suggested output is `knight_edited.bin`, not your original.
 Multiple selected meshes are flattened into one triangle stream; their names,
 parenting and hierarchy are not stored in the output.
 
@@ -165,9 +175,9 @@ are printed to Blender's Python/system console. A failure reports its message
 instead of claiming success. This is useful verification, not a comprehensive
 guarantee about every modifier or original-engine loader.
 
-For development only, after extracting the package:
+For development only, from the Picoware repository root (the packed-loader tests also use the runtime source):
 
-    python3 -m unittest discover -s tests -v
+    python3 -m unittest discover -s tools/blender/sprite3d_mesh_io/tests -v
 
 A larger, optional actual-Blender integration script is included:
 
@@ -179,36 +189,39 @@ The normal add-on workflow does not require either command.
 
 Select the model meshes, then use **N → Sprite3D → Export Billboard** or
 **File → Export → Picoware Billboard**. Static export bakes the current evaluated frame. Defaults are eight views
-at 64x64 pixels. Under **Advanced**, choose 1, 4 or 8 views and 32, 64, 96 or 128
+at 8x8 pixels. Under **Advanced**, choose 1, 4 or 8 views and 8 or 16
 pixels per square view. **Model Forward** is the direction the model faces
 in Blender's XY ground plane (the example dragon presets -X).
 
-The chosen `.billboard` name creates a new folder without that suffix.
-Existing folders are refused to prevent accidental replacement. The folder
-contains PNG previews, raw RGB332 pixels, MSB-first transparency masks,
-`billboard.json`, and `load_billboard.py`. All views share orthographic framing;
-the bottom includes 3% ground clearance. View zero looks at the front, then
-camera azimuth increases counterclockwise around Blender +Z. No mesh triangle
-limit applies to baking: only the resulting image resolution matters at runtime.
-Temporary scenes and evaluated meshes are cleaned up; source objects are not edited.
-The bake uses camera-relative studio lighting, not the source scene lighting.
+Export writes **one `.bin` file** containing every direction and pose,
+RGB332 pixels, transparency masks, world height, playback speed and loop setting.
+No image folder, JSON sidecar or per-asset Python loader is needed. Existing
+files are refused; choose a new name to preserve the old asset. Temporary render
+PNGs are removed automatically. All views share orthographic framing with 3%
+ground clearance. View zero looks at the front; camera azimuth increases
+counterclockwise around Blender +Z. The bake uses camera-relative studio lighting.
 
-Copy the whole output folder to the device SD card. From the generated loader:
+Copy that single file to the SD card. Use the reusable loader included in this
+Picoware checkout (older firmware needs the new `billboard_asset.py` module):
 
 ```python
-from load_billboard import load_billboard
-asset, height = load_billboard("/sd/dragon")
+from picoware.engine.billboard_asset import load_billboard
+asset, height = load_billboard("/sd/dragon.bin")
 entity.set_billboard(asset, height)
 ```
 
-Put the folder on `sys.path` or import its loader from your application's package.
-The loader uses `picoware.engine.image.Image`, not the GUI Image class.
+The loader validates the header and exact file length before creating images,
+then reads one frame at a time. New firmware with `set_direction_pose_data` copies each frame directly into
+billboard-owned storage, avoiding an intermediate native Image. The loader
+automatically falls back to the older Image API on compatible earlier firmware.
+Native billboard storage still keeps all poses
+and directions in memory; packing does not reduce that payload.
 The entity direction defines its front in engine world space; Model Forward
 defines which side of the Blender model is baked as the front.
 You may pass a smaller world height to display the dragon at a different scale.
 The renderer chooses an image from camera angle relative to the entity direction.
 
-Eight 64x64 views contain **36,864 bytes (36 KiB)** of pixel and mask payload.
+Eight 8x8 views contain **576 bytes** of pixel and mask payload.
 This excludes native objects, metadata and temporary loading copies. Lower
 resolution reduces memory; billboards also trade true 3D geometry for discrete
 views. The example dragon passed 17 complete framebuffer comparisons in the
@@ -223,7 +236,7 @@ been tested. Mesh export remains available independently.
 2. Select the model meshes (selecting all is fine; cameras and lights are ignored).
 3. Choose **N → Sprite3D → Export Animated Billboard**, choose a new output name,
    and export. The defaults use the timeline range and speed, four poses, eight
-   views and 64x64 pixels. No Python is needed to author or export the animation.
+   views and 8x8 pixels. No Python is needed to author or export the animation.
 
 **Preview Sampled Poses** shows exactly the poses that will be exported.
 Click **Stop Preview** to return to the original timeline frame.
@@ -231,7 +244,12 @@ The preview also stops automatically for non-looping animations. Stop normal
 Blender timeline playback before using this preview.
 
 The export dialog shows payload memory before baking: the default animated
-asset uses **144 KiB**, excluding object overhead and loading copies.
+asset uses **2.25 KiB**, excluding object overhead and loading copies.
+The maintainer target is 8x8, with 16x16 as the maximum export size.
+At 16x16, eight views and four poses use 9 KiB of pixel and mask payload.
+For larger detail, use triangle mesh export. Existing larger packed files
+remain loadable for compatibility; their old performance results below do
+not establish a recommended billboard size.
 **Advanced** holds resolution, direction count, model-forward axis and manual
 frame/rate settings. Change **Exported Poses** from 1 to 8 for the current engine.
 
@@ -241,7 +259,7 @@ second and a half-second loop. Non-looping export includes both endpoints.
 Fractional sample frames are supported. The exporter evaluates mesh modifiers
 and armatures at every sample; all frames and directions share the same framing.
 Do not use uncached simulations that depend on sequential playback as a source.
-Timeline position is restored after successful or failed baking. Output folders
+Timeline position is restored after successful or failed baking. Output files
 are only published after the whole bake succeeds.
 
 ### Editable dragon example
@@ -255,11 +273,11 @@ Select the mesh parts again before exporting.
 
 ### Play it in Picoware
 
-The generated loader keeps `load_billboard()` for static use and adds:
+The same runtime module supports animation:
 
 ```python
-from load_billboard import load_animation
-asset, animation = load_animation("/sd/dragon", entity, world_height=2.0)
+from picoware.engine.billboard_asset import load_animation
+asset, animation = load_animation("/sd/dragon.bin", entity, world_height=2.0)
 # In your existing game update, using elapsed time in seconds:
 animation.update(dt_seconds)
 ```
@@ -270,9 +288,14 @@ the viewing direction automatically. One-shot playback holds its final pose;
 `animation.reset()` restarts it. A delayed update advances to the correct pose
 instead of slowing the clip. No extra timer or background thread is created.
 
-The animated dragon passed 64 full-frame native simulator comparisons (eight
-directions, four poses, two display sizes), plus looping, skipped-update,
-one-shot and reset checks. Device memory and performance remain untested.
+The packed animated dragon passed 64 full-frame native simulator comparisons
+(eight directions, four poses, two display sizes), plus looping, skipped-update,
+one-shot and reset checks. On a PicoCalc Pico 2 W with firmware built from this
+checkout, the 147,480-byte file loaded in 162 ms and rendered 96 test frames
+across all directions and poses. The user confirmed correct display output.
+Python free heap was 349,888 bytes before loading, 199,536 after loading and GC,
+and 349,152 after detaching and GC. Mean render-call time was 35.24 ms; this is
+one dragon scene, not a general performance guarantee or sustained FPS test.
 
 ## Files and license
 
@@ -293,3 +316,53 @@ over that asset.
 - Mesh API: https://docs.blender.org/api/current/bpy.types.Mesh.html
 
 This is a custom generated add-on, not an official Blender or Godot extension.
+
+## Packed billboard format v1
+
+The 24-byte little-endian header uses `<4sBBBBHHffI`:
+
+| Offset | Value |
+| --- | --- |
+| 0 | Four-byte magic `PWBB` |
+| 4 | Version, uint8: 1 |
+| 5 | Directions, uint8: 1, 4 or 8 |
+| 6 | Poses, uint8: 1–8 |
+| 7 | Flags, uint8: bit 0 means loop; other bits must be zero |
+| 8 | Width, uint16: 8 or 16; legacy loading also accepts 32, 64, 96, 128 |
+| 10 | Height, uint16: same as width |
+| 12 | Poses per second, float32: positive, at most 60 |
+| 16 | World height, float32: positive and finite |
+| 20 | Payload length, uint32 |
+
+Payload order is pose first, then direction. Each frame contains width × height
+RGB332 bytes followed by ceil(width × height / 8) transparency bytes. Pixels
+are top-down, row-major; mask bits are MSB-first without row padding. A set bit
+is visible. No trailing data is allowed. A default 8-view, 4-pose, 8x8 asset
+is 2,328 bytes including its header. The 16x16 equivalent is 9,240 bytes. Older folder exports remain usable with
+their generated loader; re-export from Blender to obtain the packed format.
+
+## Historical 64x64 runtime optimization validation
+
+These tests predate the maintainer correction to 8x8 / 16x16 and are not
+representative of the new defaults.
+
+With the direct-buffer engine API and PicoCalc span-write integration, the same
+8-direction, 4-pose dragon at 240 MHz loaded in 125 ms versus 163 ms on the
+baseline firmware. Mean engine tick time over 96 frames was 34.47 ms versus
+35.25 ms. Retained heap use was unchanged at 150,352 bytes. These are one-scene
+measurements, not a general FPS or peak-memory guarantee. Separate measurements
+put full-screen swap at 28.69 ms and clear at 2.31 ms; full redraw is retained.
+Core implementation lives on the separate pico-game-engine branch
+`perf/billboard-buffer-load-20261016`; the binding, vendored integration and LCD
+backend live on Picoware branch `perf/billboard-runtime-20261016`.
+
+## Maintainer-size validation
+
+The normal exporter now defaults to 8x8 and permits at most 16x16. Both sizes
+passed 64 full-frame native simulator checks and 96 PicoCalc render frames.
+For eight directions and four poses, 8x8 loaded in 16 ms and retained 5,456 bytes
+of heap; 16x16 loaded in 24 ms and retained 12,112 bytes. These heap figures
+include object overhead, unlike the 2,304-byte and 9,216-byte image payloads.
+Tests used the same projected display size and 240 MHz CPU clock. Smaller
+source textures greatly reduced asset memory; whole-screen transfer still
+dominated frame time. These are not comparisons against triangle meshes.
