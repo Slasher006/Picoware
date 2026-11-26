@@ -302,7 +302,7 @@ def payload_bytes(resolution, directions, poses):
 def bake(context, filepath, resolution=16, directions=8, forward='NEG_Y',
          animated=False, frame_start=1, frame_end=25, poses=4, playback_fps=8.0, loop=True,
          pixel_art=False, outline=False, azimuth=0.0, elevation=0.0):
-    if resolution not in (8, 16) or directions not in (1, 4, 8):
+    if resolution not in (8, 16, 32, 64) or directions not in (1, 4, 8):
         raise ValueError('Unsupported billboard resolution or direction count')
     angles = {'POS_X': 0, 'POS_Y': math.pi / 2, 'NEG_X': math.pi, 'NEG_Y': -math.pi / 2}
     if forward not in angles:
@@ -314,13 +314,16 @@ def bake(context, filepath, resolution=16, directions=8, forward='NEG_Y',
     frames = sample_frames(frame_start, frame_end, poses, loop) if animated else [original_frame]
     if not math.isfinite(playback_fps) or not 0 < playback_fps <= 60:
         raise ValueError('Playback rate must be greater than zero and at most 60')
-    objects = [ob for ob in context.selected_objects if ob.type == 'MESH']
+    from .colliders import split_objects, encode_boxes, write_sidecar
+    objects, helpers = split_objects(context.selected_objects)
+    objects = [ob for ob in objects if ob.type == 'MESH']
+    collision_data = encode_boxes(context, objects, helpers, axes='Y_UP')
     if not objects:
         raise ValueError('Select the meshes to bake')
     destination = Path(bpy.path.abspath(filepath))
     if destination.suffix.lower() not in ('.bin', '.billboard'):
         destination = destination.with_suffix('.bin')
-    if destination.exists():
+    if destination.exists() or Path(str(destination)+'.colliders').exists():
         raise ValueError('Output file already exists; choose a new name')
     if not destination.parent.is_dir():
         raise ValueError('Output parent directory does not exist')
@@ -485,7 +488,12 @@ def bake(context, filepath, resolution=16, directions=8, forward='NEG_Y',
                     'azimuth': azimuth, 'elevation': elevation,
                     'mask_order': 'row-major top-down, MSB-first, no row padding',
                     'payload_bytes': payload_bytes(resolution, directions, len(frames))}
-        packed.rename(destination)
+        write_sidecar(destination, collision_data, backup=False)
+        try:
+            packed.rename(destination)
+        except Exception:
+            Path(str(destination)+'.colliders').unlink()
+            raise
         return destination, metadata
     finally:
         if scene is not None:
@@ -506,7 +514,7 @@ class SPRITE3D_OT_export_billboard(bpy.types.Operator, ExportHelper):
     bl_description = 'Bake selected meshes into one static or animated .bin asset'
     filename_ext = '.bin'
     filter_glob: StringProperty(default='*.bin;*.billboard', options={'HIDDEN'})
-    resolution: EnumProperty(name='Resolution', items=[(str(n),str(n)+' x '+str(n),'') for n in (16,8)], default='16')
+    resolution: EnumProperty(name='Resolution', items=[(str(n),str(n)+' x '+str(n),'') for n in (64,32,16,8)], default='32')
     directions: EnumProperty(name='Views', items=[(str(n),str(n),'') for n in (1,4,8)], default='8')
     forward: EnumProperty(name='Model Forward', items=[('POS_X','+X',''),('NEG_X','-X',''),('POS_Y','+Y',''),('NEG_Y','-Y','')], default='NEG_Y')
     pixel_art: BoolProperty(name='Pixel Art', default=True, description='Flat base colors, a fixed 16-color RGB332 palette, and crisp pixel edges')
@@ -572,7 +580,7 @@ class SPRITE3D_OT_export_billboard(bpy.types.Operator, ExportHelper):
         size = payload_bytes(int(self.resolution),int(self.directions),count)
         layout.label(text='Single .bin asset file')
         layout.label(text='Image + mask payload: %.1f KiB' % (size/1024))
-        layout.label(text='16 x 16 default; 8 x 8 optional')
+        layout.label(text='32 x 32 default; 8, 16 and 64 optional')
         layout.prop(self,'advanced',icon='PREFERENCES')
         if self.advanced:
             for name in ('directions','forward'):
@@ -917,7 +925,32 @@ def collect_triangles(context, objects, *, apply_modifiers=True, apply_transform
     return result, sorted(warnings)
 
 
-def export_sprite(context, objects, filepath, *, backup=True, export_textures=False,
+def export_sprite(context, objects, filepath, *, backup=True, **settings):
+    from .colliders import split_objects, encode_boxes, write_sidecar
+    from .textures import bundle_paths
+    objects, helpers = split_objects(objects)
+    collision_data = encode_boxes(context, objects, helpers, **settings)
+    path = Path(bpy.path.abspath(str(filepath))).expanduser().absolute()
+    paths = bundle_paths(path) + [Path(str(path)+'.colliders')]
+    originals = {}
+    for member in paths:
+        if member.is_symlink() or (member.exists() and not member.is_file()):
+            raise FormatError('Export destination must be a regular file: ' + str(member))
+        originals[member] = member.read_bytes() if member.exists() else None
+    try:
+        result = _export_sprite_geometry(context, objects, filepath, backup=backup, **settings)
+        write_sidecar(path, collision_data, backup)
+        return result
+    except Exception:
+        for member, old in originals.items():
+            if old is None:
+                member.unlink(missing_ok=True)
+            elif not member.exists() or member.read_bytes() != old:
+                write_atomic(member, old, backup=False, validate_mesh=False)
+        raise
+
+
+def _export_sprite_geometry(context, objects, filepath, *, backup=True, export_textures=False,
                   texture_size=128, **settings):
     if export_textures:
         from .textures import bake_export
@@ -1561,7 +1594,9 @@ AI_CLASSES = (SPRITE3D_AI_settings, SPRITE3D_OT_ai, SPRITE3D_OT_ai_prepare,
               SPRITE3D_OT_ai_timeline, SPRITE3D_PT_ai)
 
 
-CLASSES = (SPRITE3D_OT_import, SPRITE3D_OT_export, SPRITE3D_OT_export_billboard,
+from .colliders import COLLIDER_CLASSES
+
+CLASSES = COLLIDER_CLASSES + (SPRITE3D_OT_import, SPRITE3D_OT_export, SPRITE3D_OT_export_billboard,
            SPRITE3D_OT_save_source, SPRITE3D_PT_tools) + AI_CLASSES
 
 

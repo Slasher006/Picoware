@@ -61,6 +61,13 @@ blender --background --factory-startup --python-exit-code 1 \
   --python tools/blender_picoware_ai/tests/texture_export.py
 ```
 
+## Billboard resolution
+
+Billboard export supports 8, 16, 32 and 64 pixels per side (default: 32).
+Use 64 for recognizable props such as benches; eight static views use 36 KiB
+plus a 24-byte header. Each additional animation pose adds another 36 KiB.
+Disable **Pixel Art** to retain the full RGB332 color range and rendered lighting.
+
 ## Installation
 
 Install Python 3.10+ and bubblewrap (`bwrap`) using your distribution's package
@@ -136,3 +143,66 @@ environment; credentials stay out of Blender and generated scenes.
   check moving-part clearance and baked frames, including pose count and timing.
 - Jobs, prompts and reports are saved under `~/.local/share/picoware-ai/jobs`.
   Generation permits two repair attempts; progress and cancellation are in the panel.
+
+### Authored collision boxes
+
+Open the 3D View sidebar (N), then **Sprite3D → Bounding Boxes**.
+**Convert to Bounding Box** replaces the active mesh with an upright box fitted
+to its evaluated world bounds, including modifiers. The result is an invisible
+wireframe collision helper. Conversion supports Undo and leaves other objects
+sharing the original mesh unchanged. Existing parenting is retained; parent a
+standalone helper to its asset or select both when exporting. Animated or
+constrained objects must first be replaced by a static helper.
+
+To keep the visible mesh and create a separate helper, select an asset and use
+**Add Box Around Asset**. This creates one
+wireframe `COLLIDER_` cube around the selected geometry. Move and resize it to
+match the solid part of the asset; rotate around Blender Z for an angled box.
+One box is recommended, with a hard maximum of **four boxes per exported
+asset**, including all selected meshes together. Add more with the same button.
+Helpers parented under selected meshes are included automatically. Manually
+created helpers must be selected or parented under a selected mesh.
+
+The toolbox also provides:
+
+- **Assign to Asset:** select the boxes, then select the asset last (active). This
+  parents them without changing their world placement and enforces the four-box limit.
+- **Select Boxes / Show Boxes / Hide Boxes:** find the selected asset's helpers
+  and control viewport visibility. Hidden helpers still export. Select also
+  reveals hidden helpers; these recovery controls work even above the box limit.
+- **Validate Boxes:** checks count, upright transforms and rectangular shape for
+  Y Up export, reporting errors before export.
+- **Remove Collision Tag:** makes selected helpers normal visible meshes again.
+  It does not restore the shape replaced by conversion; use Undo for that.
+- **Fit to Selected Geometry:** in Edit Mode, select vertices, edges or faces,
+  then create a separate box fitted to those vertices in world space. The source
+  geometry and Edit Mode selection stay intact. Flat selections receive 0.01 units
+  of thickness. This uses the editable geometry, before modifiers, and parents
+  the helper to the active mesh. Leave Edit Mode and use Select Boxes to edit it.
+
+Helpers never enter exported triangles, texture atlases, or billboard renders.
+Use rectangular cubes without modifiers, tilt, or shear. Collision exports
+require Y Up axes and applied object transforms; unsupported settings and a
+fifth box produce an error before overwriting the asset. Boxes are static,
+including for animated billboard exports (author a suitable fixed envelope).
+Assets without helpers remain non-colliding; no invisible box is added silently.
+
+Both mesh and billboard export write `<asset filename>.colliders`. These are
+asset-space coordinates using the mesh export's origin, scale, and Y Up mapping
+(Blender X/Z/-Y). Keep the same origin and placement for sprite and mesh versions;
+a sprite's image dimensions or transparent padding are not collision dimensions.
+The engine's optional `CollisionBoxes` helper loads this data without allocation.
+Games explicitly use `blocksGround` in their movement checks; loading a visual
+asset alone does not enable blocking. Ground checks ignore box height and support
+asset translation, yaw, and positive uniform scale.
+
+Binary format version 1: ASCII `PCB1`, little-endian uint32 box count (0–4), then
+seven little-endian float32 values per box: center X/Y/Z, half-size X/Y/Z, yaw
+radians around vertical Y (positive yaw rotates +X toward +Z). File size is
+8–120 bytes. Zero-count files explicitly clear previously authored colliders.
+
+Validation:
+
+```sh
+blender --background --factory-startup --python tools/blender_picoware_ai/tests/collision_export.py
+```
