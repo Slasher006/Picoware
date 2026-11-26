@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "picoware_mesh_export"
-version = "1.5.0"
+version = "1.6.0"
 name = "Picoware Mesh and Billboard Export"
 tagline = "Edit meshes, bake billboards, and generate scenes locally"
 maintainer = "Picoware contributors"

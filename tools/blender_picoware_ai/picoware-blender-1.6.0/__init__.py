@@ -3,7 +3,7 @@
 bl_info = {
     'name': 'Picoware Mesh and Billboard Export',
     'author': 'Sprite3D Tools',
-    'version': (1, 5, 0),
+    'version': (1, 6, 0),
     'blender': (5, 0, 0),
     'location': 'File > Import/Export; View3D > Sidebar > Sprite3D',
     'description': 'Edit meshes, bake billboards, and optionally generate scenes with a local AI helper',
@@ -22,7 +22,7 @@ from typing import Iterable
 
 RECORD = struct.Struct('<9fHH')
 VERTEX = struct.Struct('<3f')
-MAX_TRIANGLES = 4096  # Picoware engine_config.hpp; smaller builds may differ.
+MAX_TRIANGLES = 65535  # Picoware engine_config.hpp; smaller builds may differ.
 MAX_COORDINATE = 1e12
 MAX_BYTES = MAX_TRIANGLES * RECORD.size
 
@@ -174,14 +174,15 @@ def linear_to_rgb565(rgb) -> int:
     return (red << 11) | (green << 5) | blue
 
 
-def write_atomic(path: str | Path, data: bytes, backup: bool = True) -> Path | None:
+def write_atomic(path: str | Path, data: bytes, backup: bool = True, *, validate_mesh=True) -> Path | None:
     """Validate, write a temporary sibling, back up old bytes, then replace.
 
     Backup names are unique. A failed backup prevents replacement. Symlinks
     are refused to avoid accidentally replacing an unrelated linked asset.
     Returns the new backup path, if a previous destination was backed up.
     """
-    decode(data)
+    if validate_mesh:
+        decode(data)
     path = Path(path).expanduser().absolute()
     if path.is_symlink():
         raise FormatError('Refusing to replace a symbolic link. Choose a regular file path.')
@@ -732,6 +733,8 @@ def load_sprite(context, filepath, *, axes='Y_UP', scale=1.0, weld=True):
     with path.open('rb') as stream:
         data = stream.read(MAX_BYTES + 1)
     triangles = decode(data)
+    from .textures import read_bundle, attach_bundle
+    bundle = read_bundle(path, len(triangles))
     vertices, faces = build_mesh_arrays(triangles, axes, scale, weld)
     mesh = bpy.data.meshes.new(path.stem)
     obj = None
@@ -761,8 +764,11 @@ def load_sprite(context, filepath, *, axes='Y_UP', scale=1.0, weld=True):
                 mesh.materials.append(material)
             polygon.material_index = slots[key]
             polygon.use_smooth = False
+        if bundle is not None:
+            attach_bundle(mesh, bundle)
         obj = bpy.data.objects.new(path.stem, mesh)
         context.collection.objects.link(obj)
+        obj['sprite3d_textured'] = bundle is not None
         obj[SOURCE_PATH] = str(path)
         obj[SOURCE_AXES] = axes
         obj[SOURCE_SCALE] = float(scale)
@@ -799,7 +805,7 @@ def _is_identity(matrix):
 
 def collect_triangles(context, objects, *, apply_modifiers=True, apply_transform=True,
                       axes='AUTO', export_scale=1.0, color_mode='AUTO', default_extra=1,
-                      fix_mirrors=True):
+                      fix_mirrors=True, texture_uvs=None):
     """Extract without editing the original mesh, modifiers, or selection."""
     check_scale(export_scale)
     objects = list(objects)
@@ -850,7 +856,9 @@ def collect_triangles(context, objects, *, apply_modifiers=True, apply_transform
                 imported_material = _material_word(material)
                 extra = (face_data[1] if face_data is not None else
                          imported_material[1] if imported_material is not None else default_extra)
-                if color_mode == 'PRESERVE':
+                if color_mode == 'TEXTURE':
+                    color = 0xFFFF
+                elif color_mode == 'PRESERVE':
                     preserved = face_data if face_data is not None else imported_material
                     if preserved is None:
                         raise FormatError(
@@ -870,8 +878,19 @@ def collect_triangles(context, objects, *, apply_modifiers=True, apply_transform
                     color = 0xFFFF
                     warnings.add('Faces without materials/original colors exported as white')
                 indices = list(triangle.vertices)
+                loops = list(triangle.loops)
                 if mirrored and fix_mirrors:
                     indices[1], indices[2] = indices[2], indices[1]
+                    loops[1], loops[2] = loops[2], loops[1]
+                if texture_uvs is not None:
+                    layer = mesh.uv_layers.active
+                    if layer is None:
+                        raise FormatError(obj.name + ': missing UV map.')
+                    uv = tuple(v for loop in loops for v in
+                               (layer.data[loop].uv.x, 1 - layer.data[loop].uv.y))
+                    if not all(math.isfinite(v) for v in uv):
+                        raise FormatError(obj.name + ': non-finite UV coordinates.')
+                    texture_uvs.append(uv)
                 coordinates = []
                 for index in indices:
                     if index not in vertex_cache:
@@ -898,7 +917,16 @@ def collect_triangles(context, objects, *, apply_modifiers=True, apply_transform
     return result, sorted(warnings)
 
 
-def export_sprite(context, objects, filepath, *, backup=True, **settings):
+def export_sprite(context, objects, filepath, *, backup=True, export_textures=False,
+                  texture_size=128, **settings):
+    if export_textures:
+        from .textures import bake_export
+        return bake_export(context, objects, filepath, backup=backup,
+                           texture_size=texture_size, **settings)
+    # Do not leave a stale manifest pointing at overwritten mesh bytes.
+    from .textures import bundle_paths
+    if bundle_paths(bpy.path.abspath(str(filepath)))[3].exists():
+        raise FormatError('This is a textured bundle. Enable texture export or choose a new filename.')
     triangles, warnings = collect_triangles(context, objects, **settings)
     data = encode(triangles)
     # Validate the complete result before touching an existing output.
@@ -983,6 +1011,11 @@ class SPRITE3D_OT_export(bpy.types.Operator, ExportHelper):
     bl_options = {'PRESET'}
     filename_ext = '.bin'
     filter_glob: StringProperty(default='*.bin;*.sprite3d', options={'HIDDEN'})
+    export_textures: BoolProperty(name='Bake Texture Atlas', default=False,
+                                  description='Bake opaque Base Color into RGB565 plus matching UV and metadata files')
+    texture_size: EnumProperty(name='Atlas Size', default='128',
+                              items=[(str(n), str(n) + ' x ' + str(n), '')
+                                     for n in (32, 64, 128, 256, 512, 1024, 2048)])
     selected_only: BoolProperty(name='Selected Objects Only', default=True)
     apply_modifiers: BoolProperty(name='Apply Modifiers', default=True,
                                  description='Export the evaluated mesh at the current frame; the modifier stack is not changed')
@@ -1017,16 +1050,22 @@ class SPRITE3D_OT_export(bpy.types.Operator, ExportHelper):
     def draw(self, context):
         layout = self.layout
         layout.prop(self, 'selected_only')
+        layout.prop(self, 'export_textures')
+        if self.export_textures:
+            layout.prop(self, 'texture_size')
+            size = int(self.texture_size)
+            layout.label(text=f'Texture memory: {size * size * 2 // 1024:,} KiB')
         layout.prop(self, 'apply_modifiers')
         layout.prop(self, 'apply_transform')
         layout.prop(self, 'axes')
         layout.prop(self, 'export_scale')
-        layout.prop(self, 'color_mode')
+        if not self.export_textures:
+            layout.prop(self, 'color_mode')
         layout.prop(self, 'default_wireframe')
         layout.prop(self, 'fix_mirrors')
         layout.prop(self, 'backup')
         layout.label(text=f'Picoware limit: {MAX_TRIANGLES:,} triangles', icon='INFO')
-        layout.label(text='No textures, rigs or animation data')
+        layout.label(text='Static geometry; no rigs or animation data')
 
     def execute(self, context):
         self.check(context)
@@ -1035,6 +1074,7 @@ class SPRITE3D_OT_export(bpy.types.Operator, ExportHelper):
         try:
             count, warnings, backup_path, _digest = export_sprite(
                 context, objects, self.filepath, backup=self.backup,
+                export_textures=self.export_textures, texture_size=int(self.texture_size),
                 apply_modifiers=self.apply_modifiers, apply_transform=self.apply_transform,
                 axes=self.axes, export_scale=self.export_scale, color_mode=self.color_mode,
                 default_extra=int(self.default_wireframe), fix_mirrors=self.fix_mirrors)
@@ -1075,6 +1115,8 @@ class SPRITE3D_OT_save_source(bpy.types.Operator):
     def execute(self, context):
         obj = context.active_object
         try:
+            if obj.get('sprite3d_textured'):
+                raise FormatError('Use Export Selected with Bake Texture Atlas to save textured assets.')
             path = Path(bpy.path.abspath(obj[SOURCE_PATH]))
             old_hash = obj.get(SOURCE_HASH)
             if path.is_file() and old_hash:

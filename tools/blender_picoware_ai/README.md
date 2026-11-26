@@ -6,6 +6,61 @@ Generate editable Blender scenes with a local OpenAI-compatible model, then expo
 Picoware meshes or animated billboards. The existing exporter works without AI.
 Validated on Linux and Blender 5.3 Alpha; other platforms are untested.
 
+## Textured Sprite3D export (1.6.0)
+
+Select UV-mapped mesh objects in Object Mode, then choose **Export Selected** and
+turn on **Bake Texture Atlas**. The exporter evaluates modifiers, packs UV islands
+across the selected objects, and bakes Principled BSDF **Base Color** into one
+opaque RGB565 atlas. Linked image textures and procedural Base Color inputs are
+supported. Original objects, UVs, selection, materials and scene settings are
+preserved. Baking uses Cycles on the CPU and can take time for larger assets.
+
+Choose the atlas size to fit the device: 128 x 128 uses 32 KiB; 256 x 256 uses
+128 KiB; 512 x 512 uses 512 KiB. UVs add 24 bytes per triangle, in addition to the
+40-byte mesh record. The 65,535-triangle format limit is not a recommended device
+budget. Texture rendering requires a supported backend (PicoCalc or the updated
+Desktop simulator); this does not add texture rendering to every board.
+
+For `model.sprite3d`, export creates these files together:
+
+- `model.sprite3d`: unchanged mesh layout, white tint on baked triangles.
+- `model.sprite3d.uv`: six little-endian float32 values per triangle, in exactly
+  the mesh's vertex order, including mirrored-winding corrections.
+- `model.sprite3d.rgb565`: little-endian RGB565 pixels, top row first.
+- `model.sprite3d.json`: dimensions, format, triangle count and integrity hashes.
+
+The metadata is for the Blender workflow; load assets explicitly in a game:
+
+```python
+from picoware.engine.sprite3d import Sprite3D
+
+sprite = Sprite3D()
+assert sprite.from_path("assets/model.sprite3d", False)
+assert sprite.from_uv_path("assets/model.sprite3d.uv")
+assert sprite.from_texture_path("assets/model.sprite3d.rgb565", 128, 128)
+```
+
+Keep the JSON beside the mesh when importing into Blender. Import restores the
+UV map and a packed preview texture; mismatched or incomplete bundles are rejected.
+Re-export with **Bake Texture Atlas** to save edits. **Save Back to Source** is
+reserved for flat-color meshes. Existing flat exports still work with texture
+baking disabled; use a new filename rather than overwriting a textured bundle
+with a flat mesh. Existing bundle members receive backups when backup is enabled;
+a failed write rolls back replaced members (this is not crash-atomic across files).
+
+Textures contain Base Color only: transparency, lighting, metallic/roughness and
+normal maps are not exported. **New Face Wireframe** controls outlines as before;
+turn it off for solid textured surfaces. For AI-generated textured assets, export
+the original scene directly: **Prepare for Picoware** deliberately creates a
+flat-color copy and is unnecessary for texture baking.
+
+Validation script (use a Blender 5.x executable):
+
+```sh
+blender --background --factory-startup --python-exit-code 1 \
+  --python tools/blender_picoware_ai/tests/texture_export.py
+```
+
 ## Installation
 
 Install Python 3.10+ and bubblewrap (`bwrap`) using your distribution's package
@@ -13,7 +68,7 @@ manager. Unprivileged user/network namespaces and Chromium's sandbox must work.
 
 Both packages are available as readable folders and matching install ZIPs:
 
-- [picoware-blender-1.5.0.zip](picoware-blender-1.5.0.zip?raw=true):
+- [picoware-blender-1.6.0.zip](picoware-blender-1.6.0.zip?raw=true):
   install through Blender's **Install from Disk** menu. Disable any older
   Picoware exporter first.
 - [picoware-ai-helper-1.0.0.zip](picoware-ai-helper-1.0.0.zip?raw=true):
@@ -26,9 +81,9 @@ folders and installation ZIPs:
 blender_picoware_ai/
 ├── README.md
 ├── build_package.py
-├── picoware-blender-1.5.0/       # Blender add-on source and manifest
+├── picoware-blender-1.6.0/       # Blender add-on source and manifest
 ├── picoware-ai/                # Optional Python helper and vendored browser code
-├── picoware-blender-1.5.0.zip
+├── picoware-blender-1.6.0.zip
 └── picoware-ai-helper-1.0.0.zip
 ```
 
@@ -76,7 +131,7 @@ environment; credentials stay out of Blender and generated scenes.
   changes. Deformation, topology changes and animated materials are unsupported.
 - **Prepare for Picoware** creates a separate flat-color copy. Transparency and
   shader effects are discarded there; original materials remain intact.
-- `.sprite3d` is static and limited to 4,096 triangles. Use **Export Animated
+- `.sprite3d` is static and limited to 65,535 triangles. Use **Export Animated
   Billboard** for animation. Technical checks do not replace visual inspection;
   check moving-part clearance and baked frames, including pose count and timing.
 - Jobs, prompts and reports are saved under `~/.local/share/picoware-ai/jobs`.
